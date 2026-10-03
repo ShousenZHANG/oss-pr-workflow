@@ -1,6 +1,6 @@
 """Mechanical hygiene checks on the branch you are about to push.
 
-    python diff_check.py owner/repo [--base upstream/main] [--plan a.py,b.py] [--allow-generated]
+    python diff_check.py owner/repo [--base REF] [--plan a.py,b.py] [--allow-generated]
 
 Run inside the clone, on the feature branch. FAIL lines block the push; WARN
 lines need a written reason in the PR notes or a fix.
@@ -11,7 +11,9 @@ Checks:
   - likely secrets in added lines
   - non-ASCII characters in added lines where the profile requires ASCII (ascii_only: yes or globs)
   - commits missing Signed-off-by when the profile says dco: yes
-  - commit trailers that attribute AI (compare with the repo's disclosure rule)
+  - commit signatures when the profile says signed_commits: yes
+  - AI disclosure trailers: required when the profile puts disclosure in commit trailers,
+    flagged otherwise
   - whitespace errors (git diff --check)
   - size above the 90th percentile of recently merged outside PRs (profile)
 """
@@ -25,7 +27,7 @@ import sys
 from dataclasses import dataclass
 
 from _config import glob_match, load_profile, scope_globs, truthy
-from _gh import git, use_utf8_stdout
+from _gh import default_base, run_git_or_exit, use_utf8_stdout
 
 LOCK_FILES = (
     "**/package-lock.json",
@@ -115,17 +117,49 @@ def check_added(
     return findings
 
 
-def check_commits(messages: list[str], dco: bool) -> list[Finding]:
+def check_commits(messages: list[str], dco: bool, trailer_regex: str | None = None) -> list[Finding]:
+    """DCO sign-off on every commit; AI trailers only where the repo asks for them (trailer_regex)."""
     findings = []
     for message in messages:
         subject = message.strip().splitlines()[0] if message.strip() else "(empty)"
         if dco and "Signed-off-by:" not in message:
             findings.append(Finding("FAIL", f"commit '{subject[:60]}' has no Signed-off-by (repo requires DCO)"))
-        if AI_TRAILER.search(message):
+        if AI_TRAILER.search(message) and not trailer_regex:
             findings.append(
-                Finding("WARN", f"commit '{subject[:60]}' has an AI attribution trailer; match repo policy")
+                Finding("WARN", f"commit '{subject[:60]}' has an AI attribution trailer the profile does not ask for")
             )
+    if trailer_regex and messages and not any(re.search(trailer_regex, m) for m in messages):
+        findings.append(
+            Finding(
+                "FAIL",
+                f"the repo wants AI disclosure in a commit trailer (regex {trailer_regex}) and no commit has it; "
+                "if the user's own rules forbid AI trailers, stop and let the user decide",
+            )
+        )
     return findings
+
+
+def check_signatures(statuses: list[tuple[str, str]], required: bool) -> list[Finding]:
+    """statuses: (subject, %G? code). G/U/X/Y/R are signed; N is unsigned; B is a bad signature; E unverifiable."""
+    if not required:
+        return []
+    findings = []
+    for subject, code in statuses:
+        if code in {"N", "B"}:
+            what = "unsigned" if code == "N" else "has a bad signature"
+            findings.append(Finding("FAIL", f"commit '{subject[:60]}' is {what}; the repo requires signed commits"))
+        elif code == "E":
+            findings.append(Finding("WARN", f"commit '{subject[:60]}' signature cannot be checked locally"))
+    return findings
+
+
+def disclosure_trailer_regex(facts: dict[str, str]) -> str | None:
+    """The profile's disclosure regex when disclosure belongs in commit trailers, else None."""
+    location = facts.get("disclosure_location", "")
+    pattern = facts.get("disclosure_regex", "")
+    if "commit-trailer" not in location or not pattern or "fill in" in pattern.lower():
+        return None
+    return pattern
 
 
 def check_size(files: int, lines: int, facts: dict[str, str]) -> list[Finding]:
@@ -151,33 +185,40 @@ def main() -> None:
     use_utf8_stdout()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repo", help="owner/repo (selects the profile)")
-    parser.add_argument("--base", default="upstream/main")
+    parser.add_argument("--base", help="base ref (default: detected upstream default branch)")
     parser.add_argument("--plan", help="comma-separated files or globs you intended to change")
     parser.add_argument("--allow-generated", action="store_true", help="the change is meant to touch generated files")
     args = parser.parse_args()
+    base = args.base or default_base()
 
     facts, _rules, profile = load_profile(args.repo)
     if profile is None:
-        print(f"WARN: no profile for {args.repo}; DCO, ASCII and size checks use defaults")
-    files = [f for f in git(["diff", "--name-only", f"{args.base}...HEAD"]).splitlines() if f.strip()]
-    diff = git(["diff", "-U0", f"{args.base}...HEAD"])
+        print(f"WARN: no profile for {args.repo}; DCO, ASCII, signing and size checks use defaults")
+    files = [f for f in run_git_or_exit(["diff", "--name-only", f"{base}...HEAD"]).splitlines() if f.strip()]
+    diff = run_git_or_exit(["diff", "-U0", f"{base}...HEAD"])
     added = added_lines(diff)
-    numstat = git(["diff", "--numstat", f"{args.base}...HEAD"]).splitlines()
+    numstat = run_git_or_exit(["diff", "--numstat", f"{base}...HEAD"]).splitlines()
     total_lines = sum(
         int(a) + int(d) for a, d, *_ in (row.split("\t") for row in numstat) if a.isdigit() and d.isdigit()
     )
-    messages = [m for m in git(["log", "--format=%B%x00", f"{args.base}..HEAD"]).split("\x00") if m.strip()]
+    messages = [m for m in run_git_or_exit(["log", "--format=%B%x00", f"{base}..HEAD"]).split("\x00") if m.strip()]
+    statuses = [
+        tuple(row.split("\x00", 1)[::-1])
+        for row in run_git_or_exit(["log", "--format=%G?%x00%s", f"{base}..HEAD"]).splitlines()
+        if "\x00" in row
+    ]
 
     plan = [p.strip() for p in args.plan.split(",") if p.strip()] if args.plan else None
     findings = check_files(files, plan, args.allow_generated)
     findings += check_added(added, scope_globs(facts.get("ascii_only")), args.allow_generated)
-    findings += check_commits(messages, truthy(facts.get("dco")))
+    findings += check_commits(messages, truthy(facts.get("dco")), disclosure_trailer_regex(facts))
+    findings += check_signatures(statuses, truthy(facts.get("signed_commits")))
     findings += check_size(len(files), total_lines, facts)
-    whitespace = whitespace_errors(args.base) if files else ""
+    whitespace = whitespace_errors(base) if files else ""
     if whitespace.strip():
         findings.append(Finding("WARN", "whitespace errors:\n" + whitespace.strip()[:600]))
 
-    print(f"{len(files)} files, {total_lines} lines changed, {len(messages)} commits against {args.base}")
+    print(f"{len(files)} files, {total_lines} lines changed, {len(messages)} commits against {base}")
     for finding in findings:
         print(f"{finding.level}: {finding.message}")
     failed = any(f.level == "FAIL" for f in findings)

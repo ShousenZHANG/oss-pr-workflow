@@ -3,12 +3,17 @@
 Build once per repo, then check candidate files against the cached map.
 
     python contention_map.py owner/repo --build
-    python contention_map.py owner/repo --check path/to/file.py [--line 120 --line 240]
+    python contention_map.py owner/repo --check src/file.py:120,245 --check tests/test_file.py
     python contention_map.py owner/repo --expect-contended path/known/to/be/touched.py
+
+`--check PATH:LINES` gives the base-branch lines you plan to change in that file
+(comma-separated); a bare PATH only reports which PRs touch the file.
 
 File lists come from the REST `pulls/<n>/files` endpoint with pagination.
 `gh pr view --json files` stops at 100 files per PR, so a large refactor PR
 that also touches your file can silently drop out of a map built that way.
+Line ranges are the base-branch lines each PR actually changes (context lines
+around a hunk are not counted).
 
 A map with failed PRs can reject a target but cannot clear one; --check says
 so whenever coverage is incomplete. --expect-contended is a sanity check: name
@@ -30,8 +35,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _config import cache_dir
-from _gh import base_side_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, use_utf8_stdout
+from _gh import base_changed_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, use_utf8_stdout
 
+CACHE_VERSION = 2
 WORKERS = 6
 HARD_CONFLICT_LINES = 10
 HOT_FILE_LINES = 30
@@ -42,24 +48,24 @@ def cache_path(repo: str) -> Path:
     return cache_dir() / "contention" / f"{repo.replace('/', '__')}.json"
 
 
-def fetch_pr_files(repo: str, number: int) -> dict[str, list[list[int]] | None] | None:
-    """Map path -> base-side hunk ranges for one PR.
-
-    A None range list means GitHub sent no patch (binary or too large).
-    """
+def fetch_pr_files(repo: str, number: int) -> dict | None:
+    """{"files": path -> changed base ranges (None when GitHub sent no patch), "added": [new paths]}."""
     files: dict[str, list[list[int]] | None] = {}
+    added: list[str] = []
     try:
         for page in gh_api_pages(f"repos/{repo}/pulls/{number}/files", max_pages=30):
             for f in page:
                 patch = f.get("patch")
-                ranges = [list(r) for r in base_side_ranges(patch)] if patch else None
+                ranges = [list(r) for r in base_changed_ranges(patch)] if patch else None
                 files[f["filename"]] = ranges
+                if f.get("status") == "added":
+                    added.append(f["filename"])
                 previous = f.get("previous_filename")
                 if previous:
                     files[previous] = ranges
     except RuntimeError:
         return None
-    return files
+    return {"files": files, "added": added}
 
 
 def build(repo: str) -> dict:
@@ -72,8 +78,8 @@ def build(repo: str) -> dict:
         results = list(pool.map(lambda pr: fetch_pr_files(repo, pr["number"]), prs))
 
     entries, failed = {}, []
-    for pr, files in zip(prs, results, strict=True):
-        if files is None:
+    for pr, result in zip(prs, results, strict=True):
+        if result is None:
             failed.append(pr["number"])
             continue
         entries[str(pr["number"])] = {
@@ -81,9 +87,10 @@ def build(repo: str) -> dict:
             "author": (pr.get("user") or {}).get("login", "ghost"),
             "updated_at": pr.get("updated_at", ""),
             "draft": pr.get("draft", False),
-            "files": files,
+            **result,
         }
     data = {
+        "version": CACHE_VERSION,
         "repo": repo,
         "built_at": datetime.now(timezone.utc).isoformat(),
         "open_prs": len(prs),
@@ -125,14 +132,27 @@ def is_own(pr: dict, me: str) -> bool:
     return bool(me) and pr["author"].lower() == me.lower()
 
 
+def parse_check(spec: str) -> tuple[str, list[int]]:
+    """`path/to/file.py:120,245` -> ("path/to/file.py", [120, 245]); a bare path has no lines."""
+    path, _, tail = spec.replace("\\", "/").rpartition(":")
+    if path and tail and all(part.strip().isdigit() for part in tail.split(",")):
+        return path, [int(part) for part in tail.split(",")]
+    return spec.replace("\\", "/"), []
+
+
 def check(data: dict, path: str, lines: list[int], me: str = "") -> None:
     hits = touching(data, path)
     if not hits:
         print(f"COLD   {path}  (no open PR touches it)")
     for n, pr in hits:
         ranges = pr["files"][path]
-        shown = "no patch" if ranges is None else ", ".join(f"{a}-{b}" for a, b in ranges)
         draft = " draft" if pr.get("draft") else ""
+        if path in pr.get("added", []):
+            print(f"SHARED {path}  #{n}{draft} @{pr['author']} updated {pr['updated_at'][:10]}  NEW FILE in that PR")
+            print(f"        {pr['title'][:90]}")
+            print("        that PR creates this file: if it exists on your base, the other PR is stale; else wait")
+            continue
+        shown = "no patch" if ranges is None else ", ".join(f"{a}-{b}" for a, b in ranges)
         print(f"SHARED {path}  #{n}{draft} @{pr['author']} updated {pr['updated_at'][:10]}  base lines {shown}")
         print(f"        {pr['title'][:90]}")
         if is_own(pr, me):
@@ -146,9 +166,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repo", help="owner/repo")
     parser.add_argument("--build", action="store_true", help="fetch every open PR's file list and cache it")
-    parser.add_argument("--check", action="append", default=[], metavar="PATH", help="repo-relative path; repeatable")
     parser.add_argument(
-        "--line", action="append", type=int, default=[], help="base-branch line you plan to edit; repeatable"
+        "--check", action="append", default=[], metavar="PATH[:LINES]", help="repo-relative path; repeatable"
     )
     parser.add_argument("--expect-contended", metavar="PATH", help="a file known to be touched by an open PR")
     args = parser.parse_args()
@@ -161,6 +180,8 @@ def main() -> None:
             data = json.loads(cache_path(args.repo).read_text(encoding="utf-8"))
         except FileNotFoundError:
             sys.exit(f"no cached map for {args.repo}; run with --build first")
+        if data.get("version") != CACHE_VERSION:
+            sys.exit("cached map is from an older version of this script; run with --build")
 
     age_hours = (datetime.now(timezone.utc) - parse_iso(data["built_at"])).total_seconds() / 3600
     covered = len(data["prs"])
@@ -178,8 +199,9 @@ def main() -> None:
         sys.exit(2)
 
     me = current_login() if args.check else ""
-    for path in args.check:
-        check(data, path.replace("\\", "/"), args.line, me)
+    for spec in args.check:
+        path, lines = parse_check(spec)
+        check(data, path, lines, me)
 
 
 if __name__ == "__main__":

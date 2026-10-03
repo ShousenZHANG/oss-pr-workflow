@@ -120,7 +120,14 @@ class TestFindingsCheck:
                 {"path": "pkg/a.py", "status": "reviewed"},
                 {"path": "docs/x.md", "status": "skipped", "reason": "docs only"},
             ],
-            "tests": [{"name": "test_empty", "fails_without_fix": True}],
+            "tests": [
+                {
+                    "name": "test_empty",
+                    "fails_without_fix": True,
+                    "without_fix_log": "without.txt",
+                    "with_fix_log": "with.txt",
+                }
+            ],
             "findings": [
                 {
                     "path": "pkg/a.py",
@@ -136,11 +143,34 @@ class TestFindingsCheck:
         base.update(overrides)
         return base
 
-    def levels(self, report):
-        return [r.level for r in validate(report, self.FILES, self.RANGES, self.COUNTS) if r.level != "INFO"]
+    LOGS = {
+        "without.txt": "tests/test_a.py::test_empty FAILED\nAssertionError: expected ValueError\n1 failed",
+        "with.txt": "tests/test_a.py::test_empty PASSED\n1 passed in 0.01s",
+    }
+
+    def levels(self, report, logs=None):
+        logs = self.LOGS if logs is None else logs
+        results = validate(report, self.FILES, self.RANGES, self.COUNTS, read_text=logs.get)
+        return [r.level for r in results if r.level != "INFO"]
 
     def test_clean_report(self):
         assert self.levels(self.report()) == []
+
+    def test_test_without_logs_fails(self):
+        report = self.report(tests=[{"name": "test_empty", "fails_without_fix": True}])
+        assert "FAIL" in self.levels(report)
+
+    def test_without_fix_log_must_show_failure(self):
+        logs = {"without.txt": "test_empty PASSED", "with.txt": self.LOGS["with.txt"]}
+        assert "FAIL" in self.levels(self.report(), logs)
+
+    def test_with_fix_log_must_be_clean(self):
+        logs = {"without.txt": self.LOGS["without.txt"], "with.txt": "test_empty PASSED\n1 failed, 3 passed"}
+        assert "FAIL" in self.levels(self.report(), logs)
+
+    def test_log_without_the_test_name_is_a_warning(self):
+        logs = {"without.txt": "FAILED something_else\n1 failed", "with.txt": self.LOGS["with.txt"]}
+        assert self.levels(self.report(), logs) == ["WARN"]
 
     def test_missing_coverage(self):
         assert "FAIL" in self.levels(self.report(coverage=[{"path": "pkg/a.py", "status": "reviewed"}]))

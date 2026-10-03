@@ -1,17 +1,19 @@
 """Check a drafted PR description against the repo's template, profile and your diff.
 
     python pr_body_check.py owner/repo --body pr_body.md [--template FILE] [--issue N] [--umbrella]
-                            [--base upstream/main] [--evidence notes.md]
+                            [--base REF] [--evidence notes.md]
 
 Run inside the clone on the feature branch. FAIL blocks showing the draft to
-the user; WARN lines must each be confirmed true or fixed.
+the user; WARN lines must each be confirmed true or fixed. --base defaults to
+the upstream default branch detected from the clone.
 
 Checks:
-  - every heading of the PR template is present
-  - the template checklist is reproduced item for item (none dropped, none invented)
-  - the AI-disclosure line required by the profile is present
+  - every heading of the PR template is present (markdown `#` headings and bold-only lines)
+  - the template checklist is reproduced item for item (none dropped, none invented;
+    a note appended after an item is fine)
+  - the AI-disclosure line required by the profile is present (unless it goes in a commit trailer)
   - the issue is linked; an umbrella issue is referenced, not closed (no Fixes/Closes)
-  - no template placeholders left (<issue number>, [Tool Name], TODO)
+  - no template placeholders or instruction text left in
   - backticked paths and identifiers exist in the diff or the repository
   - numbers in the prose appear in the diff or in an evidence file (claims like "returned 500")
 """
@@ -26,14 +28,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from _config import cache_dir, load_profile, profile_name
-from _gh import git, use_utf8_stdout
+from _gh import default_base, run_git_or_exit, use_utf8_stdout
 
 CHECKBOX = re.compile(r"^\s*[-*]\s*\[[ xX]\]\s*(.+?)\s*$")
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+BOLD_HEADING = re.compile(r"^\s*\*\*([^*]{3,}?)\*\*\s*:?\s*$")
 PLACEHOLDER = re.compile(
     r"<issue[ _-]?number>|#issue-number|\[Tool Name\]|<Tool Name>|\bTODO\b|\bTBD\b|<!-- *fill", re.IGNORECASE
 )
+TEMPLATE_INSTRUCTION = re.compile(r"\[[^\]\n]{12,}\](?!\()")
 CLOSING = r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*(?:[\w.-]+/[\w.-]+)?#{n}\b"
+UNFILLED = re.compile(r"(?i)fill in|^\s*$")
+NOT_REQUIRED = re.compile(r"(?i)^\s*(?:none|not required|n/?a)\b")
 
 
 @dataclass(frozen=True)
@@ -52,11 +58,21 @@ def normalize(text: str) -> str:
 
 
 def template_headings(template: str) -> list[str]:
-    return [m.group(1) for line in strip_comments(template).splitlines() if (m := HEADING.match(line))]
+    headings = []
+    for line in strip_comments(template).splitlines():
+        match = HEADING.match(line) or BOLD_HEADING.match(line)
+        if match:
+            headings.append(match.group(1))
+    return headings
 
 
 def checklist(text: str) -> list[str]:
     return [m.group(1) for line in strip_comments(text).splitlines() if (m := CHECKBOX.match(line))]
+
+
+def same_item(template_item: str, body_item: str) -> bool:
+    """Equal, or the body item is the template item with a note appended."""
+    return body_item == template_item or body_item.startswith(template_item + " ")
 
 
 def check_template(body: str, template: str) -> list[Finding]:
@@ -65,15 +81,18 @@ def check_template(body: str, template: str) -> list[Finding]:
     for heading in template_headings(template):
         if normalize(heading) and normalize(heading) not in body_norm:
             findings.append(Finding("FAIL", f"template heading missing: {heading!r}"))
-    wanted = [normalize(item) for item in checklist(template)]
-    have = [normalize(item) for item in checklist(body)]
-    for item, raw in zip(wanted, checklist(template), strict=True):
-        if item not in have:
+    wanted = [(normalize(item), item) for item in checklist(template)]
+    have = [(normalize(item), item) for item in checklist(body)]
+    for norm, raw in wanted:
+        if not any(same_item(norm, h) for h, _ in have):
             findings.append(Finding("FAIL", f"template checklist item missing or reworded: {raw[:90]!r}"))
     if wanted:
-        for item, raw in zip(have, checklist(body), strict=True):
-            if item not in wanted:
+        for norm, raw in have:
+            if not any(same_item(w, norm) for w, _ in wanted):
                 findings.append(Finding("FAIL", f"checklist item not in the template (invented?): {raw[:90]!r}"))
+    for instruction in TEMPLATE_INSTRUCTION.findall(strip_comments(template)):
+        if instruction in body:
+            findings.append(Finding("FAIL", f"template instruction text left in: {instruction[:80]!r}"))
     return findings
 
 
@@ -91,10 +110,20 @@ def check_links(body: str, issue: int | None, umbrella: bool, issue_required: bo
 
 
 def check_disclosure(body: str, facts: dict[str, str]) -> list[Finding]:
+    """The profile's disclosure_regex must match the body, unless disclosure belongs in commit trailers only."""
     pattern = facts.get("disclosure_regex", "")
-    if not pattern or pattern.startswith("("):
-        return [Finding("WARN", "profile has no disclosure_regex; check the AI disclosure by hand")]
-    if not re.search(pattern, body):
+    location = facts.get("disclosure_location", "body")
+    if NOT_REQUIRED.match(pattern):
+        return []
+    if UNFILLED.search(pattern):
+        return [Finding("FAIL", "profile disclosure_regex is not filled in; finish the profile first")]
+    if location.strip().startswith("commit-trailer"):
+        return [Finding("INFO", "disclosure goes in commit trailers here; diff_check.py checks it")]
+    try:
+        regex = re.compile(pattern)
+    except re.error as error:
+        return [Finding("FAIL", f"profile disclosure_regex is not a valid regex: {error}")]
+    if not regex.search(body):
         return [Finding("FAIL", f"required AI disclosure not found (profile disclosure_regex: {pattern})")]
     return []
 
@@ -106,8 +135,8 @@ def check_placeholders(body: str) -> list[Finding]:
     ]
 
 
-def backticked(body: str) -> list[str]:
-    tokens = re.findall(r"`([^`\n]{2,80})`", strip_comments(body))
+def backticked(text: str) -> list[str]:
+    tokens = re.findall(r"`([^`\n]{2,80})`", strip_comments(text))
     return list(dict.fromkeys(t.strip() for t in tokens))
 
 
@@ -119,9 +148,12 @@ def looks_like_identifier(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][\w.]*(\(\))?", token)) and not token.isupper()
 
 
-def check_references(body: str, files: list[str], diff: str, repo_has) -> list[Finding]:
+def check_references(body: str, files: list[str], diff: str, repo_has, template: str = "") -> list[Finding]:
     findings = []
+    from_template = set(backticked(template))
     for token in backticked(body):
+        if token in from_template:
+            continue
         if looks_like_path(token):
             if token not in files and not repo_has(token, path=True):
                 findings.append(Finding("WARN", f"path `{token}` is not in the diff or the repository"))
@@ -132,18 +164,18 @@ def check_references(body: str, files: list[str], diff: str, repo_has) -> list[F
     return findings
 
 
-def check_numbers(body: str, diff: str, evidence: str) -> list[Finding]:
+def check_numbers(body: str, diff: str, evidence: str, template: str = "") -> list[Finding]:
     prose = re.sub(r"`[^`]*`|#\d+|\b\d+\.\d+(?:\.\d+)*\b|\b\d{4}-\d{2}-\d{2}\b|https?://\S+", " ", strip_comments(body))
     numbers = sorted(set(re.findall(r"\b\d{2,}\b", prose)), key=int)
     return [
         Finding("WARN", f"number {n} in the description is not in the diff or the evidence file; verify the claim")
         for n in numbers
-        if n not in diff and n not in evidence
+        if n not in diff and n not in evidence and n not in template
     ]
 
 
 def repo_has_factory():
-    tracked = set(git(["ls-files"]).splitlines())
+    tracked = set(run_git_or_exit(["ls-files"]).splitlines())
 
     def repo_has(token: str, path: bool) -> bool:
         if path:
@@ -171,12 +203,15 @@ def main() -> None:
     parser.add_argument("--template", help="PR template file (default: cached by profile_draft.py)")
     parser.add_argument("--issue", type=int)
     parser.add_argument("--umbrella", action="store_true", help="the issue is an umbrella that must stay open")
-    parser.add_argument("--base", default="upstream/main")
+    parser.add_argument("--base", help="base ref (default: detected upstream default branch)")
     parser.add_argument("--evidence", help="notes file that backs numeric claims (test output, repro logs)")
     parser.add_argument("--no-git", action="store_true", help="skip checks that need the clone")
     args = parser.parse_args()
 
-    body = Path(args.body).read_text(encoding="utf-8")
+    body_path = Path(args.body)
+    if not body_path.exists():
+        sys.exit(f"ERROR: body file not found: {body_path}")
+    body = body_path.read_text(encoding="utf-8")
     facts, _rules, profile = load_profile(args.repo)
     findings: list[Finding] = []
     if profile is None:
@@ -192,15 +227,17 @@ def main() -> None:
     findings += check_placeholders(body)
     evidence = Path(args.evidence).read_text(encoding="utf-8") if args.evidence else ""
     if not args.no_git:
-        files = [f for f in git(["diff", "--name-only", f"{args.base}...HEAD"]).splitlines() if f.strip()]
-        diff = git(["diff", f"{args.base}...HEAD"])
-        findings += check_references(body, files, diff, repo_has_factory())
-        findings += check_numbers(body, diff, evidence)
+        base = args.base or default_base()
+        files = [f for f in run_git_or_exit(["diff", "--name-only", f"{base}...HEAD"]).splitlines() if f.strip()]
+        diff = run_git_or_exit(["diff", f"{base}...HEAD"])
+        findings += check_references(body, files, diff, repo_has_factory(), template or "")
+        findings += check_numbers(body, diff, evidence, template or "")
 
     for finding in findings:
         print(f"{finding.level}: {finding.message}")
     failed = any(f.level == "FAIL" for f in findings)
-    print("RESULT: " + ("FAIL" if failed else "PASS (confirm every WARN)" if findings else "PASS"))
+    warned = any(f.level == "WARN" for f in findings)
+    print("RESULT: " + ("FAIL" if failed else "PASS (confirm every WARN)" if warned else "PASS"))
     sys.exit(1 if failed else 0)
 
 

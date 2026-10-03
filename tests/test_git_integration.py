@@ -112,7 +112,13 @@ def test_pr_body_check(setup):
         "main",
     )
     assert bad.returncode == 1
-    for expected in ("heading missing", "checklist item missing", "disclosure", "closing keyword", "number 500"):
+    for expected in (
+        "heading missing",
+        "checklist item missing",
+        "FAIL: required AI disclosure not found",
+        "closing keyword",
+        "number 500",
+    ):
         assert expected in bad.stdout, expected
 
 
@@ -123,7 +129,14 @@ def test_findings_check(setup):
             {"path": "pkg/a.py", "status": "reviewed"},
             {"path": "docs/note.md", "status": "skipped", "reason": "prose"},
         ],
-        "tests": [{"name": "test_empty", "fails_without_fix": True}],
+        "tests": [
+            {
+                "name": "test_empty",
+                "fails_without_fix": True,
+                "without_fix_log": "without.txt",
+                "with_fix_log": "with.txt",
+            }
+        ],
         "findings": [
             {
                 "path": "pkg/a.py",
@@ -136,6 +149,8 @@ def test_findings_check(setup):
             }
         ],
     }
+    (repo / "without.txt").write_text("test_empty FAILED\nValueError not raised\n1 failed\n", encoding="utf-8")
+    (repo / "with.txt").write_text("test_empty PASSED\n1 passed\n", encoding="utf-8")
     path = repo / "review.json"
     path.write_text(json.dumps(report), encoding="utf-8")
     ok = run("findings_check.py", repo, home, str(path), "--base", "main")
@@ -147,3 +162,22 @@ def test_findings_check(setup):
     assert bad.returncode == 1
     assert "docs/note.md: not in coverage" in bad.stdout
     assert "do not exist in the new file" in bad.stdout
+
+
+def test_default_branch_is_detected_not_assumed(tmp_path):
+    """mlflow's default branch is master; scripts must not assume upstream/main."""
+    upstream, clone, home = tmp_path / "up", tmp_path / "clone", tmp_path / "home"
+    upstream.mkdir()
+    home.mkdir()
+    git(upstream, "init", "-q", "-b", "master")
+    (upstream / "a.py").write_text("x = 1\n", encoding="utf-8")
+    git(upstream, "add", ".")
+    git(upstream, "commit", "-q", "-m", "init")
+    git(tmp_path, "clone", "-q", "-o", "upstream", str(upstream), str(clone))
+    git(clone, "checkout", "-q", "-b", "fix/x")
+    (clone / "a.py").write_text("x = 2\n", encoding="utf-8")
+    git(clone, "commit", "-q", "-a", "-m", "fix: x")
+    result = run("diff_check.py", clone, home, "acme/none")
+    assert "against upstream/master" in result.stdout, result.stdout + result.stderr
+    rules = run("rules_for.py", clone, home, "acme/none", "--changed")
+    assert "a.py" in rules.stdout, rules.stdout + rules.stderr

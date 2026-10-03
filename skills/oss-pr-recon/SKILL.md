@@ -120,6 +120,15 @@ python contention_map.py <owner>/<repo> --check src/file.py --line 120 --line 24
 
 Also check whether competing PRs duplicate *each other*: one of them is already doomed.
 
+## Issue-first repositories
+
+When the profile says `issue_required: yes`, the target is two steps, and their order matters:
+
+1. **There is no suitable issue yet** (typical for a self-found defect): the issue is the first deliverable. Draft it (reproduction, failing test output, scope, proposed fix in one paragraph) and show it; after the user approves, they file it. If the repository also needs a maintainer to triage it (a `ready` or `accepted` label, an assignee), **the PR waits for that**. Building first is allowed only if the user accepts that the work may be wasted, and the PR is not opened until the condition holds.
+2. **The issue exists and meets the repository's condition**: continue normally and link it with the profile's `link_style`.
+
+Record the issue number in the ledger. Phase 5 refuses to open the PR while the issue is missing, closed, or lacks the required label.
+
 ## Claim comment (when governance needs it)
 
 When the repo keeps one PR per issue, requires assignment, or the approach needs a maintainer's choice (and the user's config allows asking), draft a short, natural claim: the slice, the planned approach in one sentence, and nothing else. Show it; post only after approval. With `ask_maintainers: no`, skip targets that need a maintainer's choice instead of asking.

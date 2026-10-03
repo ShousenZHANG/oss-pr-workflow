@@ -16,14 +16,25 @@ Scripts are in `../oss-pr/scripts/` from this skill's directory; call them by ab
 ## 1. Set up
 
 ```bash
-gh repo fork owner/repo --clone=false            # once; the fork is the user's
-git -C <clone> fetch upstream && git -C <clone> worktree add ../<repo>-<slug> -b <type>/<slug> upstream/main
+gh repo fork owner/repo --clone=false            # once, when the user has no fork yet
+git -C <clone> fetch upstream
+git -C <clone> symbolic-ref --short refs/remotes/upstream/HEAD   # the default branch: main, master, develop...
+git -C <clone> worktree add ../<repo>-<slug> -b <type>/<slug> upstream/<default-branch>
 ```
 
+- The default branch differs between repositories (mlflow uses `master`). The scripts detect it; write `upstream/<default-branch>` wherever this skill shows a base.
 - Work only in the new worktree, never in the user's main checkout. Remove it (`git worktree remove`) when the target is merged or abandoned.
-- Sync the fork's `main` with upstream before opening a PR: a stale fork made one repository's triage bot see 1,583 changed files.
+- Sync the fork's default branch with upstream before opening a PR: a stale fork made one repository's triage bot see 1,583 changed files.
+- On Windows, large repositories need `git config core.longpaths true` in the clone (set it repo-locally) before checkout.
 - Use the repository's toolchain from the profile (hatch, uv, prek, make). Pass commit messages through a file (`git commit -F msg.txt`); shells eat backticks, `$` and backslashes.
-- **Baseline:** run the relevant tests on clean `upstream/main` first. Failures there (platform-specific MIME types, segfaults in native libraries, missing signals on Windows) are pre-existing; write them down so they are not blamed on, or hidden by, the change.
+- **Baseline:** run the relevant tests on the clean default branch first, and record the toolchain versions. Failures there (platform-specific MIME types, segfaults in native libraries, missing signals on Windows, a lock file your tool version cannot parse) are pre-existing; write them down so they are not blamed on, or hidden by, the change.
+
+### When a check cannot run locally
+
+A required tool may be missing (Go, yarn, a CI-only container) or the platform may not support a check. Do not install system software without the user's consent, and do not pretend the check passed:
+1. Run everything that can run, including the new test through the narrowest runner that works.
+2. List each check that could not run, with the reason, in `review.json` under `"not_run"` and in the briefing to the user.
+3. Ask the user to choose: install the tool, or accept that CI will be the first run of those checks (then watch CI closely after opening). Without that choice the exit check below is not met.
 
 ## 2. Implement
 
@@ -36,7 +47,8 @@ git -C <clone> fetch upstream && git -C <clone> worktree add ../<repo>-<slug> -b
 
 1. Write the test, run it, see it **fail** for the right reason on the unfixed code.
 2. Apply the fix, see it pass.
-3. Revert the fix (or delete the decorator / guard under test) and confirm the test fails again. Record the test name with `"fails_without_fix": true` in `review.json`.
+3. Revert the fix (or delete the decorator / guard under test) and confirm the test fails again.
+4. Save both runs' output to files (`runs/without_fix.txt`, `runs/with_fix.txt`) and record them in `review.json`: `"fails_without_fix": true`, the `command`, `without_fix_log`, `with_fix_log`. `findings_check.py` reads the logs; a bare `true` is not accepted.
 
 Rules from past rejections:
 - **No tautological tests.** An expected value computed by the same constant or call as the code under test always passes. Hard-code the expected value or derive it independently.
@@ -75,7 +87,7 @@ Run every job the profile lists under "Local checks that match CI", not only the
 Then:
 
 ```bash
-python diff_check.py owner/repo --base upstream/main --plan "src/a.py,tests/test_a.py,releasenotes/notes/*"
+python diff_check.py owner/repo --plan "src/a.py,tests/test_a.py,releasenotes/notes/*"
 ```
 
 FAIL lines block: unplanned files, likely secrets, non-ASCII where the profile forbids it, commits without `Signed-off-by` in DCO repositories. Every WARN gets a fix or a written reason.
@@ -93,37 +105,45 @@ Review depth follows the size of the change (thresholds from alibaba/open-code-r
 Give each reviewer the diff, the issue text, the profile, and these four lenses:
 1. **Defects** in the changed code: logic, boundaries, error paths, concurrency, security. Use the language checklist in `../oss-pr/checklists/`.
 2. **Fidelity to precedent**: does it look like the merged PRs here, and is every claim the PR body will make actually true of this diff?
-3. **Freshness**: re-run `contention_map.py --check` for the changed files; rebase onto current `upstream/main` and re-run the tests.
+3. **Freshness**: re-run `contention_map.py --check` for the changed files; rebase onto the current default branch and re-run the tests.
 4. **Odds**: does anything found change the recon estimate? Update the ledger if so.
+
+**When the host cannot spawn subagents** (some hosts only allow them on the user's explicit request): do the review yourself as a separate pass after the code is final, reading the diff top to bottom with the four lenses and the checklist, and record `"reviewer": "inline"` in `review.json` so the user knows the review was not independent.
 
 Reviewers report in this shape; write it to `review.json` in the worktree (not committed):
 
 ```json
 {
+  "reviewer": "subagent",
   "coverage": [{"path": "src/a.py", "status": "reviewed"},
                {"path": "docs/x.md", "status": "skipped", "reason": "docs only"}],
-  "tests": [{"name": "test_empty_messages", "fails_without_fix": true}],
+  "tests": [{"name": "test_empty_messages", "fails_without_fix": true,
+             "command": "pytest tests/test_a.py -k empty_messages",
+             "without_fix_log": "runs/without_fix.txt", "with_fix_log": "runs/with_fix.txt"}],
+  "not_run": [{"check": "yarn typecheck", "reason": "yarn not installed"}],
   "findings": [{"path": "src/a.py", "start_line": 40, "end_line": 42, "severity": "high",
                 "category": "behavior-change", "evidence": "old code returned 400 here",
                 "resolution": "fixed"}]
 }
 ```
 
+Severity: `critical`, `high`, `medium`, `low`. Category: `bug`, `security`, `performance`, `maintainability`, `test`, `style`, `documentation`, `behavior-change`, `compatibility`, `concurrency`, `unused-parameter`, `other`.
+
 **Resolving findings** (precision is not the goal here; a missed defect costs a rejection, a false alarm costs minutes):
 - Every finding ends `fixed` or `dismissed: <proof>`. A dismissal needs evidence from the diff or the code, not an argument.
 - Findings about **behaviour change, compatibility, concurrency, security, or an unused parameter** can be dismissed only with a test: `dismissed: test: test_old_status_kept passes`.
 
 ```bash
-python findings_check.py review.json --base upstream/main
+python findings_check.py review.json
 ```
 
-It fails when a changed file is missing from coverage, a line number does not exist in the new file, a finding is unresolved, a protected category was dismissed without a test, or no test was recorded as failing without the fix.
+It fails when a changed file is missing from coverage, a line number does not exist in the new file, a finding is unresolved, a protected category was dismissed without a test, or no test is proven by its saved output to fail without the fix and pass with it.
 
 ## Exit check
 
 - `diff_check.py` PASS and every WARN answered.
-- `findings_check.py` PASS (coverage 100%, all findings resolved, a failing-without-fix test recorded).
-- All CI-equivalent commands pass, or each failure is shown to be pre-existing on the baseline.
+- `findings_check.py` PASS (coverage 100%, all findings resolved, a test proven by saved runs to fail without the fix).
+- All CI-equivalent commands pass, or each failure is shown to be pre-existing on the baseline, or each check that could not run is listed under `not_run` and the user chose how to handle it.
 - For `human-in-loop` repositories: the user has been told they must read every changed line before submission.
 
 ## Common mistakes

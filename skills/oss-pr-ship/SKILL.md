@@ -21,7 +21,11 @@ python pacing.py owner/repo
 
 STOP means do not open a new PR now: a flagged-PR freeze, the repository's open-PR limit, the user's per-repo cap, every open PR silent for the configured days, or the minimum interval since the last new PR. Work in another repository instead.
 
-Personal gates the user must clear themselves, from the profile: CLA signed, `Signed-off-by` on every commit for DCO, commit signing configured where `signed_commits: yes`. For `human-in-loop` repositories, ask the user to confirm they have read every changed line, and do not continue without that confirmation.
+Personal gates the user must clear themselves, from the profile: CLA signed, `Signed-off-by` on every commit for DCO, commit signing configured where `signed_commits: yes` (`diff_check.py` fails unsigned commits). For `human-in-loop` repositories, ask the user to confirm they have read every changed line, and do not continue without that confirmation.
+
+**Issue gate** for `issue_required: yes` repositories: `python issue_prs.py owner/repo <issue>` must show the issue open, and it must carry any label the profile requires (for example `ready`). If not, stop: the PR would be closed by the repository's automation.
+
+**Disclosure location**: when the profile's `disclosure_location` is `commit-trailer`, the disclosure goes into the commit message trailer and `diff_check.py` checks it. If the user's own standing instructions forbid AI trailers in commits, do not pick a side: tell the user the repository requires one and let them decide whether to contribute here.
 
 ## 2. Draft the issue (when the repository needs one first)
 

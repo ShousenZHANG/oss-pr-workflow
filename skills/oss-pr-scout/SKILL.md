@@ -22,11 +22,11 @@ gh issue list -R owner/repo --state open --limit 200 --json number,title,labels,
 For every plausible issue read the **full** comment thread (the decisive "I'll take this" is often in the middle). Drop it if:
 - it is assigned, or someone claimed it in a comment and was not told no;
 - `issue_prs.py owner/repo N` shows an open PR, or a closed PR rejected on the merits;
-- the profile marks it handled internally (a "handled internally" label or notice);
+- it carries one of the profile's `internal_labels`, or a "handled internally" notice;
 - it needs a maintainer to choose between approaches and `ask_maintainers: no`;
 - the AI policy is `issue-restricted` and the issue lacks the required label or acceptance criteria.
 
-A result count equal to `--limit` means the list was cut off: raise the limit or page.
+A result count equal to `--limit` means the list was cut off. On repositories with thousands of open issues, narrow the query instead of raising the limit: `--label bug`, the label the AI policy or profile requires (`help wanted`, `ready`), `--search "no:assignee -linked:pr sort:updated-desc"`.
 
 ## Channel 2: umbrella issues (campaigns)
 
@@ -43,7 +43,7 @@ Large issues sliced by many contributors ("remove X from all controllers", "add 
 Used when `sources` includes `self-found`. Review is thinnest in code merged during the last two weeks:
 
 ```bash
-git log upstream/main --since="14 days ago" --name-only --pretty=format: -- <src-dir> | sort | uniq -c | sort -rn | head -25
+git log upstream/<default-branch> --since="14 days ago" --name-only --pretty=format: -- <src-dir> | sort | uniq -c | sort -rn | head -25
 ```
 
 Read the newest changes with the checklist for the language (`../oss-pr/checklists/<language>.md`). Strongest finds: an internal inconsistency (the same value handled two ways), a check dropped in a refactor, empty input indexed without a guard, a `None` path that reaches code assuming a value.

@@ -7,7 +7,7 @@ misses many PRs closed without merging while still finding the merged ones,
 which inflates the rate: on deepset-ai/haystack over 30 days it found all 261
 merged PRs but only 25 of 113 closed-unmerged ones.
 
-"External" excludes bots and anyone who merged a PR in the window. The second
+"External" excludes bots and anyone who merged a PR in the last 90 days. The second
 rule matters because author_association only sees public organization
 membership: employees with private membership show up as CONTRIBUTOR.
 
@@ -19,6 +19,7 @@ PR was opened. The split usually matters more than the overall rate.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -37,6 +38,7 @@ from _gh import (
 )
 
 LOOKBACK_DAYS = 365
+MAINTAINER_WINDOW_DAYS = 90  # merging any PR in this window marks an author as a maintainer
 AUTHORS_PER_QUERY = 10
 
 
@@ -178,13 +180,40 @@ def rate_line(label: str, rows: list[ClosedPR]) -> str:
     return f"{label:<28} merged {merged:>4}  closed-unmerged {closed:>4}  rate {pct}"
 
 
-def last_comment(repo: str, number: int) -> str:
-    comments = gh_json(["api", f"repos/{repo}/issues/{number}/comments?per_page=100"]) or []
-    if not comments:
-        return "(no comment)"
-    last = comments[-1]
-    body = " ".join((last.get("body") or "").split())
-    return f"[{last['user']['login']}] {body[:220]}"
+BOILERPLATE = re.compile(
+    r"(?i)install \S+ from this pr|preview (?:deploy|is ready|environment)|codecov|coverage report|"
+    r"^thanks? (?:you )?for (?:your|the|opening)[^.!]{0,40}[.!]?$|documentation preview|build artifacts?"
+)
+
+
+def closing_comment(comments: list[dict], closed_at: str) -> dict | None:
+    """The comment that explains the closure: the last one up to the close, preferring a person over a bot,
+    and skipping bot boilerplate such as install instructions or preview links."""
+    cutoff = parse_iso(closed_at) + timedelta(minutes=10) if closed_at else None
+    before = [c for c in comments if cutoff is None or parse_iso(c["created_at"]) <= cutoff] or comments
+    useful = [c for c in before if not BOILERPLATE.search(" ".join((c.get("body") or "").split()))]
+    humans = [c for c in useful if not is_bot(c["user"]["login"], c["user"].get("type", ""))]
+    pool = humans or useful
+    return pool[-1] if pool else None
+
+
+def death_note(repo: str, pr: ClosedPR) -> str:
+    """Who closed the PR (the author, a bot, or someone else) and the comment that explains it."""
+    events = gh_json(["api", f"repos/{repo}/issues/{pr.number}/events?per_page=100"]) or []
+    closers = [e.get("actor") or {} for e in events if e.get("event") == "closed"]
+    closer = closers[-1].get("login", "?") if closers else "?"
+    if closer == pr.author:
+        who = "closed by the author"
+    elif is_bot(closer, closers[-1].get("type", "") if closers else ""):
+        who = f"closed by bot @{closer}"
+    else:
+        who = f"closed by @{closer}"
+    comments = gh_json(["api", f"repos/{repo}/issues/{pr.number}/comments?per_page=100"]) or []
+    comment = closing_comment(comments, pr.closed_at)
+    if comment is None:
+        return f"{who}; no explaining comment"
+    body = " ".join((comment.get("body") or "").split())
+    return f"{who}; [{comment['user']['login']}] {body[:220]}"
 
 
 def main() -> None:
@@ -205,7 +234,7 @@ def main() -> None:
     check_api_budget()
 
     rows = collect_closed(args.repo, args.days)
-    maintainers = mergers(args.repo, args.days)
+    maintainers = mergers(args.repo, max(args.days, MAINTAINER_WINDOW_DAYS))
     external = external_only(rows, maintainers)
     hidden = sorted({r.author for r in rows if r.association in EXTERNAL_ASSOCIATIONS and r.author in maintainers})
 
@@ -241,7 +270,7 @@ def main() -> None:
         print(f"\nlast comment on the {len(dead)} most recent closed-unmerged external PRs:")
         for r in dead:
             print(f"  #{r.number} @{r.author} ({r.association}) {r.title[:70]}")
-            print(f"      {last_comment(args.repo, r.number)}")
+            print(f"      {death_note(args.repo, r)}")
 
 
 if __name__ == "__main__":

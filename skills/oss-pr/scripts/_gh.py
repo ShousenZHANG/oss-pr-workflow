@@ -171,6 +171,45 @@ def base_side_ranges(patch: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def base_changed_ranges(patch: str) -> list[tuple[int, int]]:
+    """Base-branch lines a patch actually changes, without the context lines around each hunk.
+
+    A removed line counts as itself; an insertion counts as the base line it is
+    inserted before. Consecutive lines are merged into one range. Hunk headers
+    alone overstate a change by up to three context lines on each side.
+    """
+    touched: list[int] = []
+    base = 0
+    replacing = False  # inside a run of removed lines: added lines replace them, not a new insertion
+    for line in (patch or "").splitlines():
+        header = _HUNK_HEADER.match(line)
+        if header:
+            base = int(header.group(1))
+            if header.group(2) == "0":
+                base += 1  # `-k,0` means "insert after line k"
+            replacing = False
+            continue
+        if not base or line.startswith("\\"):
+            continue
+        if line.startswith("-"):
+            touched.append(base)
+            base += 1
+            replacing = True
+        elif line.startswith("+"):
+            if not replacing:
+                touched.append(base)
+        else:
+            base += 1
+            replacing = False
+    ranges: list[tuple[int, int]] = []
+    for number in sorted(set(touched)):
+        if ranges and number <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], number)
+        else:
+            ranges.append((number, number))
+    return ranges
+
+
 def new_side_ranges(patch: str) -> list[tuple[int, int]]:
     """New-file line ranges each hunk touches; a pure deletion (`+c,0`) yields no range."""
     ranges = []
@@ -188,3 +227,36 @@ def git(args: list[str], cwd: str | None = None) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()[:300]}")
     return result.stdout
+
+
+def default_base() -> str:
+    """The upstream default branch as a ref (`upstream/master`, `origin/main`, ...), detected from the clone.
+
+    Repositories differ (mlflow uses master), so scripts must not assume `main`.
+    Falls back to `upstream/main` when nothing can be detected.
+    """
+    for remote in ("upstream", "origin"):
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        for branch in ("main", "master"):
+            probe = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], capture_output=True
+            )
+            if probe.returncode == 0:
+                return f"{remote}/{branch}"
+    return "upstream/main"
+
+
+def run_git_or_exit(args: list[str]) -> str:
+    """git() for command-line entry points: print a clean message instead of a traceback."""
+    try:
+        return git(args)
+    except RuntimeError as error:
+        sys.exit(f"ERROR: {error}\nHint: run inside the clone, and pass --base <remote>/<default-branch> if needed.")

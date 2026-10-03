@@ -1,7 +1,7 @@
 """Print the repo rules that apply to the files you changed or plan to change.
 
     python rules_for.py owner/repo path/a.py path/b.ts ...
-    python rules_for.py owner/repo --changed [--base upstream/main]   # files changed on this branch
+    python rules_for.py owner/repo --changed [--base REF]   # files changed on this branch, committed or not
 
 Rules come from the `## Path rules` table of the repo profile (glob -> rule).
 When the `ocr` CLI from alibaba/open-code-review is installed, its built-in
@@ -18,7 +18,7 @@ import sys
 from collections import defaultdict
 
 from _config import glob_match, load_profile
-from _gh import git, use_utf8_stdout
+from _gh import default_base, run_git_or_exit, use_utf8_stdout
 
 
 def group_rules(paths: list[str], rules: list[tuple[str, str]]) -> tuple[dict[str, list[str]], list[str]]:
@@ -35,8 +35,11 @@ def group_rules(paths: list[str], rules: list[tuple[str, str]]) -> tuple[dict[st
 
 
 def changed_files(base: str) -> list[str]:
-    out = git(["diff", "--name-only", f"{base}...HEAD"])
-    return [line for line in out.splitlines() if line.strip()]
+    """Files changed since the branch left `base`: committed, staged, unstaged, and new untracked files."""
+    merge_base = run_git_or_exit(["merge-base", base, "HEAD"]).strip()
+    tracked = run_git_or_exit(["diff", "--name-only", merge_base])
+    untracked = run_git_or_exit(["ls-files", "--others", "--exclude-standard"])
+    return list(dict.fromkeys(line for line in (tracked + untracked).splitlines() if line.strip()))
 
 
 def ocr_rules(paths: list[str]) -> str | None:
@@ -54,10 +57,10 @@ def main() -> None:
     parser.add_argument("repo", help="owner/repo")
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--changed", action="store_true", help="use the files changed on the current branch")
-    parser.add_argument("--base", default="upstream/main", help="base ref for --changed (default upstream/main)")
+    parser.add_argument("--base", help="base ref for --changed (default: detected upstream default branch)")
     args = parser.parse_args()
 
-    paths = changed_files(args.base) if args.changed else [p.replace("\\", "/") for p in args.paths]
+    paths = changed_files(args.base or default_base()) if args.changed else [p.replace("\\", "/") for p in args.paths]
     if not paths:
         sys.exit("no paths given")
     _facts, rules, profile = load_profile(args.repo)

@@ -76,7 +76,7 @@ def _report(tests):
 def test_r7_tautological_test_is_rejected():
     """Tests whose expected value came from the same constant as the code could never fail."""
     results = validate(_report([{"name": "test_value", "fails_without_fix": False}]), ["pkg/a.py"], {}, {})
-    assert any(r.level == "FAIL" and "failing without the fix" in r.message for r in results)
+    assert any(r.level == "FAIL" and "proven to fail without the fix" in r.message for r in results)
 
 
 def test_r8_closed_umbrella_is_flagged():
