@@ -1,5 +1,7 @@
 """Measure how often outside contributors' PRs get merged in a repository.
 
+    python base_rate.py owner/repo [--days 30] [--show-closed 10] [--no-split] [--me LOGIN]
+
 Uses the REST pull list, not the search API. The search `closed:` date filter
 misses many PRs closed without merging while still finding the merged ones,
 which inflates the rate: on deepset-ai/haystack over 30 days it found all 261
@@ -9,24 +11,33 @@ merged PRs but only 25 of 113 closed-unmerged ones.
 rule matters because author_association only sees public organization
 membership: employees with private membership show up as CONTRIBUTOR.
 
-Usage:
-    python base_rate.py owner/repo [--days 30] [--show-closed 10]
+External PRs are split into newcomers and returning contributors: returning
+means the author had a PR merged in this repo during the 12 months before the
+PR was opened. The split usually matters more than the overall rate.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
+from datetime import timedelta
 
 from _gh import (
     EXTERNAL_ASSOCIATIONS,
+    check_api_budget,
+    current_login,
     days_ago,
     gh_api_pages,
+    gh_graphql,
     gh_json,
     is_bot,
     parse_iso,
     use_utf8_stdout,
 )
+
+LOOKBACK_DAYS = 365
+AUTHORS_PER_QUERY = 10
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,7 @@ class ClosedPR:
     merged: bool
     closed_at: str
     title: str
+    created_at: str = ""
 
 
 def collect_closed(repo: str, days: float) -> list[ClosedPR]:
@@ -65,6 +77,7 @@ def collect_closed(repo: str, days: float) -> list[ClosedPR]:
                     merged=pr.get("merged_at") is not None,
                     closed_at=pr["closed_at"],
                     title=pr.get("title", ""),
+                    created_at=pr.get("created_at", ""),
                 )
             )
     return rows
@@ -89,10 +102,10 @@ def mergers(repo: str, days: float) -> set[str]:
     found: set[str] = set()
     cursor = None
     while True:
-        args = ["api", "graphql", "-f", f"query={MERGERS_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"]
+        variables = {"owner": owner, "name": name}
         if cursor:
-            args += ["-F", f"cursor={cursor}"]
-        data = gh_json(args)
+            variables["cursor"] = cursor
+        data = gh_graphql(MERGERS_QUERY, **variables)
         if data is None:
             raise RuntimeError("failed to list mergers")
         prs = data["data"]["repository"]["pullRequests"]
@@ -112,6 +125,50 @@ def external_only(rows: list[ClosedPR], maintainers: set[str] = frozenset()) -> 
         for r in rows
         if r.association in EXTERNAL_ASSOCIATIONS and not is_bot(r.author, r.user_type) and r.author not in maintainers
     ]
+
+
+def merge_history(repo: str, logins: list[str], since: str) -> dict[str, list[str] | None]:
+    """mergedAt timestamps of each author's merged PRs in the repo since `since` (YYYY-MM-DD).
+
+    Batches several authors into one GraphQL query with aliased searches. The
+    `merged:` qualifier is reliable for merged PRs; only `closed:` drops PRs.
+    None marks an author whose history could not be fetched.
+    """
+    history: dict[str, list[str] | None] = {}
+    for start in range(0, len(logins), AUTHORS_PER_QUERY):
+        batch = logins[start : start + AUTHORS_PER_QUERY]
+        parts = [
+            f'a{i}: search(query: "repo:{repo} is:pr is:merged author:{login} merged:>={since}", '
+            f"type: ISSUE, first: 100) {{ nodes {{ ... on PullRequest {{ mergedAt }} }} }}"
+            for i, login in enumerate(batch)
+        ]
+        data = gh_graphql("query { " + " ".join(parts) + " }")
+        for i, login in enumerate(batch):
+            result = (data or {}).get("data", {}).get(f"a{i}") if data else None
+            history[login] = None if result is None else [n["mergedAt"] for n in result["nodes"] if n.get("mergedAt")]
+    return history
+
+
+def is_returning(created_at: str, merged_dates: list[str]) -> bool:
+    """True when some merge happened in the LOOKBACK_DAYS before the PR was opened."""
+    created = parse_iso(created_at)
+    earliest = created - timedelta(days=LOOKBACK_DAYS)
+    return any(earliest <= parse_iso(d) < created for d in merged_dates)
+
+
+def split_by_status(
+    rows: list[ClosedPR], history: dict[str, list[str] | None]
+) -> tuple[list[ClosedPR], list[ClosedPR], list[ClosedPR]]:
+    newcomers, returning, unknown = [], [], []
+    for r in rows:
+        dates = history.get(r.author)
+        if dates is None:
+            unknown.append(r)
+        elif is_returning(r.created_at, dates):
+            returning.append(r)
+        else:
+            newcomers.append(r)
+    return newcomers, returning, unknown
 
 
 def rate_line(label: str, rows: list[ClosedPR]) -> str:
@@ -142,7 +199,10 @@ def main() -> None:
         metavar="N",
         help="print the last comment of the N most recent closed-unmerged external PRs, to classify why they died",
     )
+    parser.add_argument("--no-split", action="store_true", help="skip the newcomer / returning split (fewer API calls)")
+    parser.add_argument("--me", help="login whose own status to report (default: the authenticated user)")
     args = parser.parse_args()
+    check_api_budget()
 
     rows = collect_closed(args.repo, args.days)
     maintainers = mergers(args.repo, args.days)
@@ -154,9 +214,27 @@ def main() -> None:
     print(rate_line("external, non-bot", external))
     if hidden:
         print(f"excluded as maintainers despite CONTRIBUTOR/NONE association (they merged PRs): {', '.join(hidden)}")
-    print("note: there is no first-timer split, because author_association is the author's relation today and a")
-    print("      first-timer whose PR merged is already CONTRIBUTOR; repos that land PRs by pushing to main outside")
-    print("      GitHub show those PRs as closed-unmerged, so read the death causes below before trusting the rate.")
+
+    me = args.me or current_login()
+    since = (days_ago(args.days + LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    if not args.no_split:
+        authors = sorted({r.author for r in external})
+        print(f"classifying {len(authors)} external authors by merge history ...", file=sys.stderr)
+        history = merge_history(args.repo, authors, since)
+        newcomers, returning, unknown = split_by_status(external, history)
+        print(rate_line("  newcomers", newcomers))
+        print(rate_line("  returning contributors", returning))
+        if unknown:
+            print(f"  {len(unknown)} PRs from authors whose history could not be fetched are in neither line")
+    if me:
+        mine = merge_history(args.repo, [me], days_ago(LOOKBACK_DAYS).strftime("%Y-%m-%d")).get(me)
+        if mine is None:
+            print(f"your status (@{me}): unknown (history fetch failed)")
+        else:
+            status = "RETURNING" if mine else "NEWCOMER"
+            print(f"your status (@{me}): {status} ({len(mine)} merged PRs here in the last 12 months)")
+    print("note: repos that land PRs outside GitHub's merge button show them as closed-unmerged;")
+    print("      read the death causes below before trusting any rate.")
 
     dead = [r for r in external if not r.merged][: args.show_closed]
     if dead:

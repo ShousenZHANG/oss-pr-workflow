@@ -1,11 +1,19 @@
 {
-  "name": "oss-pr-recon",
-  "description": "Check that an open source contribution target is free and likely to merge before writing code: issue history, file and hunk contention, merge base rates, and per-repo rules.",
+  "name": "oss-pr-workflow",
+  "description": "Take any GitHub repository from issue scan to merged pull request: repository profile, target scouting, recon, build with self-review, and paced submission, with scripted gates between each phase.",
   "version": "1.0.0",
   "author": {
     "name": "ShousenZHANG"
   },
   "license": "MIT",
-  "keywords": ["open-source", "pull-request", "contribution", "github", "recon"],
-  "skills": ["./skills/oss-contribution-recon"]
+  "keywords": ["open-source", "pull-request", "contribution", "github", "workflow", "code-review"],
+  "commands": "./commands",
+  "skills": [
+    "./skills/oss-pr",
+    "./skills/oss-pr-profile",
+    "./skills/oss-pr-scout",
+    "./skills/oss-pr-recon",
+    "./skills/oss-pr-build",
+    "./skills/oss-pr-ship"
+  ]
 }

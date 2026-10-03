@@ -4,13 +4,20 @@ Build once per repo, then check candidate files against the cached map.
 
     python contention_map.py owner/repo --build
     python contention_map.py owner/repo --check path/to/file.py [--line 120 --line 240]
+    python contention_map.py owner/repo --expect-contended path/known/to/be/touched.py
 
 File lists come from the REST `pulls/<n>/files` endpoint with pagination.
 `gh pr view --json files` stops at 100 files per PR, so a large refactor PR
 that also touches your file can silently drop out of a map built that way.
 
 A map with failed PRs can reject a target but cannot clear one; --check says
-so whenever coverage is incomplete.
+so whenever coverage is incomplete. --expect-contended is a sanity check: name
+a file you know an open PR touches. If the map does not contain it, the map is
+broken (wrong cache path, failed fetch) and every COLD result from it is
+meaningless; the script exits with status 2.
+
+Your own open PRs are flagged: two of your PRs editing the same lines conflict
+as soon as one of them merges, so they have to go one after another.
 """
 
 from __future__ import annotations
@@ -22,9 +29,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _gh import base_side_ranges, gh_api_pages, parse_iso, use_utf8_stdout
+from _config import cache_dir
+from _gh import base_side_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, use_utf8_stdout
 
-CACHE_DIR = Path.home() / ".cache" / "oss-pr-recon"
 WORKERS = 6
 HARD_CONFLICT_LINES = 10
 HOT_FILE_LINES = 30
@@ -32,7 +39,7 @@ STALE_AFTER_HOURS = 24
 
 
 def cache_path(repo: str) -> Path:
-    return CACHE_DIR / f"{repo.replace('/', '__')}.json"
+    return cache_dir() / "contention" / f"{repo.replace('/', '__')}.json"
 
 
 def fetch_pr_files(repo: str, number: int) -> dict[str, list[list[int]] | None] | None:
@@ -83,9 +90,10 @@ def build(repo: str) -> dict:
         "failed": failed,
         "prs": entries,
     }
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path(repo).write_text(json.dumps(data), encoding="utf-8")
-    print(f"cached {len(entries)}/{len(prs)} PRs to {cache_path(repo)}; failed: {failed or 'none'}", file=sys.stderr)
+    path = cache_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    print(f"cached {len(entries)}/{len(prs)} PRs to {path}; failed: {failed or 'none'}", file=sys.stderr)
     return data
 
 
@@ -109,16 +117,26 @@ def verdict(line: int, ranges: list[list[int]] | None) -> str:
     return f"DISTINCT ({d} lines away)"
 
 
-def check(data: dict, path: str, lines: list[int]) -> None:
-    hits = [(n, pr) for n, pr in data["prs"].items() if path in pr["files"]]
+def touching(data: dict, path: str) -> list[tuple[str, dict]]:
+    return sorted(((n, pr) for n, pr in data["prs"].items() if path in pr["files"]), key=lambda item: int(item[0]))
+
+
+def is_own(pr: dict, me: str) -> bool:
+    return bool(me) and pr["author"].lower() == me.lower()
+
+
+def check(data: dict, path: str, lines: list[int], me: str = "") -> None:
+    hits = touching(data, path)
     if not hits:
         print(f"COLD   {path}  (no open PR touches it)")
-    for n, pr in sorted(hits, key=lambda item: int(item[0])):
+    for n, pr in hits:
         ranges = pr["files"][path]
         shown = "no patch" if ranges is None else ", ".join(f"{a}-{b}" for a, b in ranges)
         draft = " draft" if pr.get("draft") else ""
         print(f"SHARED {path}  #{n}{draft} @{pr['author']} updated {pr['updated_at'][:10]}  base lines {shown}")
         print(f"        {pr['title'][:90]}")
+        if is_own(pr, me):
+            print("        YOUR OWN PR: open the next one after this merges, or rebase and re-check the exact lines")
         for line in lines:
             print(f"        your line {line}: {verdict(line, ranges)}")
 
@@ -132,9 +150,11 @@ def main() -> None:
     parser.add_argument(
         "--line", action="append", type=int, default=[], help="base-branch line you plan to edit; repeatable"
     )
+    parser.add_argument("--expect-contended", metavar="PATH", help="a file known to be touched by an open PR")
     args = parser.parse_args()
 
     if args.build:
+        check_api_budget()
         data = build(args.repo)
     else:
         try:
@@ -153,8 +173,13 @@ def main() -> None:
             "a COLD result here does not clear a file"
         )
 
+    if args.expect_contended and not touching(data, args.expect_contended.replace("\\", "/")):
+        print(f"ERROR: sanity check failed, {args.expect_contended} is not in the map; do not trust COLD results")
+        sys.exit(2)
+
+    me = current_login() if args.check else ""
     for path in args.check:
-        check(data, path.replace("\\", "/"), args.line)
+        check(data, path.replace("\\", "/"), args.line, me)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import argparse
 from collections import Counter
 from datetime import timedelta
 
-from _gh import days_ago, gh_json, is_bot, parse_iso, use_utf8_stdout
+from _gh import days_ago, gh_json, is_bot, parse_iso, truncation_warning, use_utf8_stdout
 
 VIEW_FIELDS = (
     "title,state,isDraft,mergeable,reviewDecision,updatedAt,labels,assignees,reviews,comments,statusCheckRollup"
@@ -94,6 +94,9 @@ def main() -> None:
         )
         or []
     )
+    warning = truncation_warning(len(open_prs), 100, "the open-PR search")
+    if warning:
+        print(warning)
     open_prs = sorted(
         (p for p in open_prs if foreign(p)), key=lambda p: (p["repository"]["nameWithOwner"], p["number"])
     )
@@ -120,6 +123,9 @@ def main() -> None:
         )
         or []
     )
+    warning = truncation_warning(len(merged), 1000, "the merged-PR search")
+    if warning:
+        print(warning)
     merged = [m for m in merged if foreign(m)]
     per_repo = Counter(m["repository"]["nameWithOwner"] for m in merged)
     recent = [m for m in merged if parse_iso(m["closedAt"]) >= days_ago(args.since_days)]

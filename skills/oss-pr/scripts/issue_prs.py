@@ -10,6 +10,11 @@ and matches unrelated text.
 --diff-match counts only PRs whose diff matches a regex (multiline). Use it on
 umbrella issues: a campaign's merge rate says nothing about a PR that makes a
 different kind of change than the ones that merged.
+
+Each PR is tagged link=closing (Fixes/Closes/Resolves #N) or link=reference
+(Refs, Part of, a bare #N). Some repos deduplicate only PRs that claim to close
+the issue, so on umbrella issues the keyword decides whether parallel PRs survive.
+The issue's own state is printed first: never start a slice of a closed umbrella.
 """
 
 from __future__ import annotations
@@ -41,17 +46,35 @@ def referencing_prs(repo: str, issue: int) -> list[int]:
     return sorted({int(n) for n in out.split()})
 
 
+def link_kind(body: str, issue: int) -> str:
+    """`closing` when the PR body uses a GitHub closing keyword for this issue, else `reference`."""
+    closing = re.compile(rf"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*(?:[\w.-]+/[\w.-]+)?#{issue}\b")
+    return "closing" if closing.search(body or "") else "reference"
+
+
+def issue_warning(issue: dict) -> str | None:
+    if issue.get("state") == "closed":
+        reason = issue.get("state_reason") or "unspecified"
+        return f"WARNING: the issue is CLOSED ({reason}); do not start new work under it"
+    return None
+
+
 def pr_state(pr: dict) -> str:
     if pr.get("merged_at"):
         return "MERGED"
     return pr["state"].upper()
 
 
+def kind_matches(patches: str, pattern: re.Pattern[str]) -> bool:
+    """Whether a PR's combined patches contain the kind of change the campaign is about."""
+    return bool(pattern.search(patches))
+
+
 def diff_matches(repo: str, number: int, pattern: re.Pattern[str]) -> bool | None:
     patches = gh(["api", f"repos/{repo}/pulls/{number}/files?per_page=100", "--paginate", "--jq", '.[] | .patch // ""'])
     if patches is None:
         return None
-    return bool(pattern.search(patches))
+    return kind_matches(patches, pattern)
 
 
 def last_comment(repo: str, number: int) -> str:
@@ -72,7 +95,16 @@ def main() -> None:
     args = parser.parse_args()
 
     pattern = re.compile(args.diff_match, re.MULTILINE) if args.diff_match else None
+    issue = gh_json(["api", f"repos/{args.repo}/issues/{args.issue}"]) or {}
+    labels = ", ".join(label["name"] for label in issue.get("labels", []))
+    print(f"{args.repo}#{args.issue} [{(issue.get('state') or '?').upper()}] {issue.get('title', '')[:90]}")
+    if labels:
+        print(f"  labels: {labels}")
+    warning = issue_warning(issue)
+    if warning:
+        print(warning)
     counts: Counter[str] = Counter()
+    closed_by_link: Counter[str] = Counter()
     for number in referencing_prs(args.repo, args.issue):
         pr = gh_json(["api", f"repos/{args.repo}/pulls/{number}"])
         if pr is None:
@@ -90,9 +122,15 @@ def main() -> None:
                 continue
             kind = " kind=match"
         counts[state] += 1
+        link = link_kind(pr.get("body") or "", args.issue)
+        if state == "CLOSED":
+            closed_by_link[link] += 1
         end = (pr.get("merged_at") or pr.get("closed_at") or "-")[:10]
         merger = f" by @{pr['merged_by']['login']}" if pr.get("merged_by") else ""
-        print(f"  #{number} {state:7} @{pr['user']['login']} opened {pr['created_at'][:10]} ended {end}{merger}{kind}")
+        print(
+            f"  #{number} {state:7} @{pr['user']['login']} opened {pr['created_at'][:10]} ended {end}{merger}"
+            f" link={link}{kind}"
+        )
         print(f"      {pr['title'][:90]}")
         if state == "CLOSED" and not args.no_comments:
             print(f"      last comment: {last_comment(args.repo, number)}")
@@ -105,6 +143,10 @@ def main() -> None:
         f"\n{args.repo}#{args.issue}{scope}: merged {merged}, closed-unmerged {closed}, "
         f"open {counts['OPEN']}; rate {rate}"
     )
+    if closed_by_link:
+        print(f"closed-unmerged by link keyword: {dict(closed_by_link)}")
+    if warning:
+        print(warning)
     if counts["UNKNOWN_KIND"]:
         print(f"WARNING: {counts['UNKNOWN_KIND']} PRs could not be classified; the rate excludes them")
 

@@ -1,61 +1,90 @@
-# oss-pr-recon
+# oss-pr-workflow
 
 [English](README.md) | 简体中文
 
-一个 Claude Code Skill 加四个小脚本，只回答一个问题：**这个开源贡献目标真的没人做吗？提了 PR 能活下来吗？** 在写代码之前回答它。
+一个 Claude Code 插件：给定任意 GitHub 仓库，从"扫描 issue"一路走到"PR 合并"。每个阶段之间都有用脚本把关的检查点，保证提交出去的东西不会因为本来就能预见的原因被拒。
 
-在热门仓库（1 万星以上、每周几十个合并）里，大多数被拒的 PR 不是因为代码质量差，而是因为：issue 早被别人认领了；另一个开着的 PR 正在改同一个函数；仓库一个 issue 只保留一个 PR；或者漏了 AI 披露、发版说明这类规定。这个 Skill 按顺序逐项检查。
+在热门仓库里，大多数被拒的 PR 不是代码质量问题，而是因为：issue 早被别人认领了；另一个 PR 正在改同几行；仓库一个 issue 只留一个 PR；仓库禁止 AI 辅助；或者漏了 AI 披露、发版说明这类规定。这里的每个阶段专门拦住其中一类失败。
 
-## 内容
+## 阶段
 
-```
-skills/oss-contribution-recon/
-├── SKILL.md            方法：规则 → issue → 文件 → 代码段 → 仓库治理规则 → 通过概率
-├── scripts/            需要算准的数交给脚本，不每次手写（也就不会每次写错）
-└── repos/              每个仓库一份规则清单，标注核对日期和来源
-```
+| # | Skill | 做什么 | 进入下一阶段前的检查 |
+|---|---|---|---|
+| 0 | `oss-pr` | 可选：按语言列出候选仓库，附合并数据和 AI 规定 | 你挑一个 |
+| 1 | `oss-pr-profile` | 从仓库自己的文档和已合并 PR 起草规则档案，由你核对 | AI 规定允许你贡献；档案已核对 |
+| 2 | `oss-pr-scout` | 从已有 issue、大型 issue、近期合并的代码里找最多 5 个目标 | 你挑一个 |
+| 3 | `oss-pr-recon` | 证明目标没人在做（issue、文件、代码行、仓库治理规则），并估计通过率 | 硬闸门全部通过；你说开工 |
+| 4 | `oss-pr-build` | 在单独的工作目录里先写测试再实现，本地复现 CI，独立审查 | 测试在撤掉修复后会失败；每个文件都审过；检查全部通过 |
+| 5 | `oss-pr-ship` | 控制节奏，起草并检查 PR 文字，你确认后才发出，之后持续跟进 | 节奏检查放行；你确认了最终文字 |
 
-| 脚本 | 回答什么 |
-|------|---------|
-| `issue_prs.py owner/repo N` | 引用过 issue N 的所有 PR（任何状态），以及每个被关 PR 的最后一条评论。`--diff-match 正则` 只统计做了某类改动的 PR。 |
-| `contention_map.py owner/repo --build` / `--check 路径 --line 行号` | 每个开着的 PR 改了哪些文件、哪些行；你打算改的地方是硬冲突、热文件还是互不相干。 |
-| `base_rate.py owner/repo` | 最近 N 天外部贡献者 PR 的合并率，以及被关的那些是怎么死的。 |
-| `pr_status.py` | 你在别人仓库里开着的 PR：CI、审阅、新评论，以及 12 个月内的合并数。 |
+**任何别人看得到的动作，都要你确认那段确切的文字之后才执行**：评论、开 issue、开 PR、回复审查意见、催审。唯一自动执行的网络写操作，是推送到你自己的 fork。
 
-为什么用脚本而不是文字说明：下面这些测量手写时每一个都出过错。
+## 脚本
 
-- 搜索接口的 `closed:` 日期过滤会漏掉大量"关闭未合并"的 PR。同一仓库同 30 天，搜索得到 261 合并、25 关闭（91%），REST 列表是 261 和 113（69.8%）。
-- `author_association` 会把组织成员身份不公开的员工标成 `CONTRIBUTOR`，有些项目机器人也是普通用户账号。同一仓库里，这让外部贡献者合并率从 48.8% 变成了 65.5%。
-- `gh pr view --json files` 最多返回 100 个文件，一个改了 234 个文件、也碰了你的文件的重构 PR 只显示 100 个。
-- 一个大 issue 底下的合并率，如果合并的 PR 和你做的不是同一类改动，对你没有参考意义。
+`skills/oss-pr/scripts/` 里有 12 个只用标准库的 Python 脚本，负责所有不能算错的测量，每个都有 `--help`。用途见 [README.md](README.md#scripts) 的表格。
+
+为什么用脚本：下面这些手工做时每一项都出过错。
+
+- 搜索接口的 `closed:` 日期过滤会漏掉"关闭未合并"的 PR。同一仓库 30 天内，这类 PR 有 113 个，搜索只找到 25 个，合并率被算成 91%，实际是 69.8%。
+- `author_association` 会把组织成员身份不公开的员工标成 `CONTRIBUTOR`，有些项目机器人也是普通用户账号，结果 48.8% 被算成了 65.5%。
+- 外部整体合并率谁也代表不了：同一仓库里，新人合并率 39.6%，老贡献者 74.5%。
+- `gh pr view --json files` 最多返回 100 个文件，一个改了 234 个文件、也碰了你文件的重构 PR 只显示 100 个。
+- 仓库的 `AGENTS.md` 可以不出现"AI"这个词，就禁止代理提 PR。
+- 几分钟内开出的 20 个相似 PR，被当成垃圾一起关掉。
 
 ## 安装
 
 作为 Claude Code 插件：
 
 ```
-/plugin marketplace add ShousenZHANG/oss-pr-recon
-/plugin install oss-pr-recon@oss-pr-recon
+/plugin marketplace add ShousenZHANG/oss-pr-workflow
+/plugin install oss-pr-workflow@oss-pr-workflow
 ```
 
-或者把 `skills/oss-contribution-recon/` 复制到 `~/.claude/skills/`。
+或者把 `skills/` 下的所有目录复制到 `~/.claude/skills/`。要保持它们并排放置，因为各阶段的 Skill 会调用 `oss-pr/scripts/` 里的脚本。
 
 需要 Python 3.10+ 和已登录的 [GitHub CLI](https://cli.github.com/)（`gh auth status`）。不需要安装 Python 包。
 
 ## 使用
 
-让 Claude 挑选或核查目标（"owner/repo 的 issue 1234 能做吗？"），Skill 会自动加载。脚本也能单独跑，命令见 [README.md](README.md#use)。
+```
+/oss-pr deepset-ai/haystack          开始或继续某个仓库
+/oss-pr deepset-ai/haystack 12765    从指定 issue 开始
+/oss-pr status                       你开着的 PR，以及需要你处理的事
+/oss-pr pick-repo go                 候选仓库
+```
+
+第一次使用时会问你几个问题：从哪些来源选题、能不能向维护者提问、每个仓库同时开几个 PR、用什么语言汇报。你的数据都放在 `~/.oss-pr/`：`config.md`、`ledger.md`、`repos/` 下的仓库档案，以及 `cache/`。`skills/oss-pr/examples/repos/` 里有 dify、haystack、airflow 三份示例档案，标注了核对日期，会过时。
 
 ## 原则
 
-- 这里没有任何东西会发评论、开 PR，只读。
-- 各仓库自己的规定优先：AI 披露写法、同时开 PR 的上限、标题格式都不一样。`repos/` 里的文件记录的是标注日期当时的情况，旧的要重新核对。
+- 各仓库自己的规定优先：AI 使用、披露写法、同时开 PR 的上限、标题和 issue 引用格式。
+- 禁止 AI 辅助的仓库不碰；只禁止自主代理的仓库，要求你亲自读过每一行改动。
+- issue、评论和机器人输出里的文字一律当作数据，绝不当作指令执行。
 - 目的是少提、提准，不是多提。
+
+## 开发
+
+```bash
+python -m pip install pytest ruff
+python -m pytest
+ruff check . && ruff format --check .
+```
+
+测试里包含 10 个回归用例，每个都对应一次真实发生过的失败，以及现在负责拦住它的检查（`tests/test_regressions.py`）。
 
 ## 致谢
 
-- 设计思路借鉴 [alibaba/open-code-review](https://github.com/alibaba/open-code-review)：不能出错的步骤用确定性代码完成，规则按文件路径匹配。没有复制它的代码或提示词。
-- 想要端到端贡献流程，可搭配 [majiayu000/spellbook](https://github.com/majiayu000/spellbook)（MIT）里的 `contributor`。
+- 设计思路借鉴自 [alibaba/open-code-review](https://github.com/alibaba/open-code-review)：
+  - 不能出错的步骤交给确定性代码。
+  - 规则按文件路径匹配。
+  - 审查深度按改动大小分级。
+  - 审查必须覆盖每个文件。
+  - 意见指到的行号要和 diff 核对。
+  - 只有能被 diff 证明错了的意见才能驳回。
+
+  没有复制它的代码或提示词。
+- 想换一种贡献流程，可以看 [majiayu000/spellbook](https://github.com/majiayu000/spellbook)（MIT）里的 `contributor`。
 
 ## 许可证
 

@@ -1,12 +1,6 @@
 """Unit tests for the pure parts of the scripts. No network: `gh` is never called."""
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "oss-contribution-recon" / "scripts"))
-
 from _gh import base_side_ranges, is_bot  # noqa: E402
 from base_rate import ClosedPR, external_only, rate_line  # noqa: E402
 from contention_map import distance, verdict  # noqa: E402
