@@ -377,6 +377,14 @@ def resolve_symlink_docs(repo: str, branch: str, docs: dict[str, str], tree: set
     return resolved
 
 
+def automation_paths(tree: list[str]) -> tuple[list[str], list[str]]:
+    """(workflow files, scripts under .github/). Scripts the workflows run often sit next to them
+    in .github/workflows/ (mlflow's auto-close-pr.js), so that directory is not excluded."""
+    workflows = [p for p in tree if WORKFLOW_PATH.match(p)][:200]
+    scripts = [p for p in tree if WORKFLOW_SCRIPT_PATH.match(p)][:80]
+    return workflows, scripts
+
+
 def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """(policy docs, PR templates, workflow and workflow-script texts) from raw.githubusercontent.com."""
     templates = [p for p in tree if TEMPLATE_PATH.match(p)]
@@ -388,8 +396,7 @@ def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str],
         and p.lower().endswith((".md", ".rst", ".txt", ".mdx"))
         and CONTRIB_DOC_TOPIC.search(p.rsplit("/", 1)[-1])
     ]
-    workflow_paths = [p for p in tree if WORKFLOW_PATH.match(p)][:200]
-    script_paths = [p for p in tree if WORKFLOW_SCRIPT_PATH.match(p) and not p.startswith(".github/workflows/")][:60]
+    workflow_paths, script_paths = automation_paths(tree)
     docs = resolve_symlink_docs(repo, branch, fetch_many(repo, branch, list(dict.fromkeys(doc_paths))[:40]), set(tree))
     template_texts = fetch_many(repo, branch, templates)
     automation = fetch_many(repo, branch, workflow_paths + script_paths)

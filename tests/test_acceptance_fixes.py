@@ -224,3 +224,13 @@ class TestCiliumFindings:
         assert AI_CLOSURE.search("Please don't get your AI to generate patches for open issues like this")
         assert AI_CLOSURE.search("closing: this looks like AI-generated slop")
         assert not AI_CLOSURE.search("Fixes the AI Gateway timeout")
+
+
+def test_workflow_scripts_next_to_workflows_are_read():
+    """mlflow's PR auto-close rules live in .github/workflows/auto-close-pr.js (second acceptance run)."""
+    from profile_draft import automation_paths
+
+    tree = [".github/workflows/ci.yml", ".github/workflows/auto-close-pr.js", ".github/scripts/x.py", "src/a.js"]
+    workflows, scripts = automation_paths(tree)
+    assert workflows == [".github/workflows/ci.yml"]
+    assert scripts == [".github/workflows/auto-close-pr.js", ".github/scripts/x.py"]
