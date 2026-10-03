@@ -1,0 +1,11 @@
+{
+  "name": "oss-pr-recon",
+  "description": "Check that an open source contribution target is free and likely to merge before writing code: issue history, file and hunk contention, merge base rates, and per-repo rules.",
+  "version": "1.0.0",
+  "author": {
+    "name": "ShousenZHANG"
+  },
+  "license": "MIT",
+  "keywords": ["open-source", "pull-request", "contribution", "github", "recon"],
+  "skills": ["./skills/oss-contribution-recon"]
+}
