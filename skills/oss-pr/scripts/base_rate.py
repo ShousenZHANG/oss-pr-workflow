@@ -180,6 +180,11 @@ def rate_line(label: str, rows: list[ClosedPR]) -> str:
     return f"{label:<28} merged {merged:>4}  closed-unmerged {closed:>4}  rate {pct}"
 
 
+AI_CLOSURE = re.compile(
+    r"(?i)\b(?:ai|llm|gpt)[- ](?:generated|written|authored|assisted|tools?|slop|patch(?:es)?)\b|\byour AI\b|"
+    r"generated (?:by|with) (?:an? )?(?:ai|llm|chatgpt|copilot|claude)|\bslop\b|autonomous agents?|"
+    r"coding agents?|\bAI[- ]policy\b|generative ai"
+)
 BOILERPLATE = re.compile(
     r"(?i)install \S+ from this pr|preview (?:deploy|is ready|environment)|codecov|coverage report|"
     r"^thanks? (?:you )?for (?:your|the|opening)[^.!]{0,40}[.!]?$|documentation preview|build artifacts?"
@@ -267,10 +272,19 @@ def main() -> None:
 
     dead = [r for r in external if not r.merged][: args.show_closed]
     if dead:
-        print(f"\nlast comment on the {len(dead)} most recent closed-unmerged external PRs:")
+        print(f"\nwhy the {len(dead)} most recent closed-unmerged external PRs were closed:")
+        ai_closures = 0
         for r in dead:
+            note = death_note(args.repo, r)
+            ai_closures += bool(AI_CLOSURE.search(note))
             print(f"  #{r.number} @{r.author} ({r.association}) {r.title[:70]}")
-            print(f"      {death_note(args.repo, r)}")
+            print(f"      {note}")
+        if ai_closures:
+            share = 100 * ai_closures / len(dead)
+            print(
+                f"\n{ai_closures} of {len(dead)} closures ({share:.0f}%) mention AI or LLM use. "
+                "Re-check the AI-policy gate: practice can be stricter than the written policy."
+            )
 
 
 if __name__ == "__main__":

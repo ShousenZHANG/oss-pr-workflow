@@ -160,3 +160,67 @@ class TestProfileDraft:
     def test_disclosure_lines_ignore_product_talk(self):
         bodies = ["Fixes the AI Gateway retry logic for LLM judges", "Generated-by: Claude Code following the rules"]
         assert disclosure_lines(bodies) == ["Generated-by: Claude Code following the rules"]
+
+
+class TestCiliumFindings:
+    def test_dco_wording_with_curly_apostrophe(self):
+        from profile_draft import DCO_TEXT
+
+        assert DCO_TEXT.search("All commits are signed off. See the section Developer’s Certificate of Origin")
+
+    def test_policy_links_followed_across_repos(self):
+        from profile_draft import policy_links
+
+        text = (
+            "Read our [AI policy](https://github.com/cilium/community/blob/main/AI-POLICY.md) and the "
+            "[contributing guide](../Documentation/contributing/guide.rst). See [build docs](build.md)."
+        )
+        links = policy_links(".github/pull_request_template.md", text)
+        assert ("cilium/community", "main::AI-POLICY.md") in links
+        assert ("", "Documentation/contributing/guide.rst") in links
+        assert all("build.md" not in path for _, path in links)
+
+    def test_vendored_agent_files_are_not_path_rules(self):
+        from profile_draft import scoped_agent_files
+
+        tree = ["vendor/github.com/aws/smithy-go/AGENTS.md", "pkg/AGENTS.md", "third_party/x/CLAUDE.md"]
+        assert scoped_agent_files(tree) == ["pkg/AGENTS.md"]
+
+    def test_ai_written_pr_text_forbidden(self):
+        from profile_draft import forbids_ai_text
+
+        docs = {"AI-POLICY.md": "The PR description must not be written by generative AI tools."}
+        assert forbids_ai_text(docs)
+
+    def test_ail_disclosure_lines(self):
+        assert disclosure_lines(["This PR was prepared with AIL:3"]) == ["This PR was prepared with AIL:3"]
+
+    def test_release_note_block_and_attestations(self):
+        from pr_body_check import check_attestations, check_release_block
+
+        template = "Description\n\n```release-note\n<!-- note -->\n```\n"
+        assert check_release_block("no block", template)[0].level == "FAIL"
+        assert check_release_block("```release-note\nFix panic\n```", template) == []
+        warns = check_attestations("- [x] I have read the contributing guide\n- [x] Tests pass\n")
+        assert len(warns) == 1 and "contributing guide" in warns[0].message
+
+    def test_test_waiver_needs_user_approval(self):
+        from findings_check import validate
+
+        report = {
+            "coverage": [{"path": "a.go", "status": "reviewed"}],
+            "tests": [],
+            "findings": [],
+            "test_waiver": {"precedent": "#41600", "ci_coverage": "e2e job", "approved_by_user": True},
+        }
+        levels = [r.level for r in validate(report, ["a.go"], {}, {"a.go": 10}) if r.level != "INFO"]
+        assert levels == ["WARN"]
+        report["test_waiver"]["approved_by_user"] = False
+        assert "FAIL" in [r.level for r in validate(report, ["a.go"], {}, {"a.go": 10})]
+
+    def test_ai_closure_detection(self):
+        from base_rate import AI_CLOSURE
+
+        assert AI_CLOSURE.search("Please don't get your AI to generate patches for open issues like this")
+        assert AI_CLOSURE.search("closing: this looks like AI-generated slop")
+        assert not AI_CLOSURE.search("Fixes the AI Gateway timeout")

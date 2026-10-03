@@ -37,7 +37,18 @@ DOC_NAME = re.compile(
     r"pull_request_template|code_of_conduct_for_ai)\.(md|rst|txt)$"
 )
 CONTRIB_DOC_DIR = re.compile(
-    r"(?i)^(contributing-docs|contribute|contributing|docs/contribut\w*|\.github/contributing)/"
+    r"(?i)^(contributing-docs|contribute|contributing|docs/contribut\w*|\.github/contributing|"
+    r"documentation/contribut\w*(?:/development)?)/"
+)
+VENDORED = re.compile(r"(?i)(^|/)(vendor|third_party|third-party|node_modules|external)/")
+POLICY_LINK = re.compile(r"\[([^\]]+)\]\((https://github\.com/[^)\s]+|[^)\s:]+\.(?:md|rst))\)")
+POLICY_REF_LINK = re.compile(r"(?m)^\s*\[([^\]]+)\]:\s*(https://github\.com/\S+|[^\s:]+\.(?:md|rst))\s*$")
+POLICY_LINK_TOPIC = re.compile(r"(?i)\b(?:ai|policy|contribut\w*|pull request|guidelines?)\b")
+DCO_TEXT = re.compile(
+    r"(?i)\bDCO\b|Developer.?s? Certificate of Origin|Signed-off-by|--signoff|\bsigned[- ]off\b|\bsign[- ]off\b"
+)
+PR_TEXT_TERM = re.compile(
+    r"(?i)\b(?:description|communication|comments?|issues?|pr text|pull request text|written|messages?)\b"
 )
 CONTRIB_DOC_TOPIC = re.compile(
     r"(?i)(pull.?request|\bai\b|ai[_-]|gen.?ai|open.?pull|limit|commit|review|issue|guideline|readme|index)"
@@ -104,6 +115,7 @@ class Evidence:
     source: str
     line: int
     text: str
+    direct: bool = True  # the line alone carries the rule (not only together with the next line)
 
 
 def classify_line(window: str, agent_doc: bool = False) -> str | None:
@@ -140,6 +152,21 @@ def classify_line(window: str, agent_doc: bool = False) -> str | None:
     return None
 
 
+def forbids_ai_text(docs: dict[str, str]) -> tuple[str, int, str] | None:
+    """A rule that PR descriptions or other communication must not be written by AI (the user writes them)."""
+    for source, text in docs.items():
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            window = line + " " + (lines[i + 1] if i + 1 < len(lines) else "")
+            if (
+                AI_TERM.search(window)
+                and PR_TEXT_TERM.search(window)
+                and (BAN.search(window) or re.search(r"(?i)\bnot (?:be )?(?:written|generated)\b", window))
+            ):
+                return source, i + 1, " ".join(line.split())[:200]
+    return None
+
+
 def forbids_ai_replies(docs: dict[str, str]) -> tuple[str, int, str] | None:
     """A rule that answers to maintainers must be the contributor's own words, not AI output."""
     for source, text in docs.items():
@@ -170,7 +197,8 @@ def classify_ai_policy(docs: dict[str, str]) -> tuple[str, list[Evidence]]:
                 allows = True
             level = classify_line(window, agent_doc)
             if level:
-                evidence.append(Evidence(level, source, i + 1, " ".join(line.split())[:220]))
+                direct = classify_line(line, agent_doc) == level
+                evidence.append(Evidence(level, source, i + 1, " ".join(line.split())[:220], direct))
     if not evidence:
         return "none", []
     levels = {e.level for e in evidence}
@@ -179,7 +207,7 @@ def classify_ai_policy(docs: dict[str, str]) -> tuple[str, list[Evidence]]:
         levels.add("human-in-loop")
         evidence = [replace(e, level="human-in-loop") if e.level == "banned" else e for e in evidence]
     overall = min(levels, key=lambda level: STRICTNESS[level])
-    evidence.sort(key=lambda e: STRICTNESS[e.level])
+    evidence.sort(key=lambda e: (STRICTNESS[e.level], not e.direct))
     return overall, evidence
 
 
@@ -296,7 +324,7 @@ def disclosure_lines(bodies: list[str]) -> list[str]:
     statement = re.compile(
         r"(?i)^(?:generated-by|assisted-by|co-authored-by|from \w+)\b|"
         r"\b(?:written|generated|created|assisted|authored) (?:with|by|using) (?:an? )?(?:AI|LLM|claude|copilot|"
-        r"codex|cursor|chatgpt)|\bAI (?:assistance|assistant|tools? (?:was|were) used)"
+        r"codex|cursor|chatgpt)|\bAI (?:assistance|assistant|tools? (?:was|were) used)|\bAIL\s*:\s*\d"
     )
     for body in bodies:
         for line in body.splitlines():
@@ -365,7 +393,47 @@ def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str],
     docs = resolve_symlink_docs(repo, branch, fetch_many(repo, branch, list(dict.fromkeys(doc_paths))[:40]), set(tree))
     template_texts = fetch_many(repo, branch, templates)
     automation = fetch_many(repo, branch, workflow_paths + script_paths)
-    return docs, template_texts, automation
+    linked = fetch_linked_policies(repo, branch, {**docs, **template_texts}, set(docs) | set(template_texts))
+    return {**docs, **linked}, template_texts, automation
+
+
+def policy_links(source: str, text: str) -> list[tuple[str, str]]:
+    """(repo, path) of documents a template or guide links to under an AI / policy / contributing title.
+
+    The governing AI policy sometimes lives in another repository (an org-wide
+    community repo), reachable only through such a link.
+    """
+    found = []
+    for title, target in POLICY_LINK.findall(text) + POLICY_REF_LINK.findall(text):
+        if not POLICY_LINK_TOPIC.search(title + " " + target):
+            continue
+        blob = re.match(r"https://github\.com/([^/]+/[^/]+)/blob/([^/]+)/(.+?)(?:#.*)?$", target)
+        if blob:
+            found.append((blob.group(1), f"{blob.group(2)}::{blob.group(3)}"))
+        elif not target.startswith("http"):
+            base = source.rsplit("/", 1)[0] + "/" if "/" in source else ""
+            path = re.sub(r"[^/]+/\.\./", "", base + target.split("#")[0]).lstrip("./")
+            found.append(("", path))
+    return found
+
+
+def fetch_linked_policies(repo: str, branch: str, docs: dict[str, str], seen: set[str]) -> dict[str, str]:
+    linked: dict[str, str] = {}
+    for source, text in docs.items():
+        for target_repo, spec in policy_links(source.split(" -> ")[0], text):
+            if len(linked) >= 8:
+                return linked
+            if target_repo:
+                ref, path = spec.split("::", 1)
+                key = f"{target_repo}:{path}"
+                content = None if key in seen else raw_file(target_repo, path, ref)
+            else:
+                key, path = spec, spec
+                content = None if key in seen else raw_file(repo, path, branch)
+            if content:
+                seen.add(key)
+                linked[f"linked {key}"] = content
+    return linked
 
 
 def is_policy_location(path: str) -> bool:
@@ -375,7 +443,8 @@ def is_policy_location(path: str) -> bool:
 
 
 def scoped_agent_files(tree: list[str]) -> list[str]:
-    return [p for p in tree if re.search(r"(^|/)(AGENTS|CLAUDE)\.md$", p) and "/" in p][:40]
+    """Directory-scoped AGENTS.md / CLAUDE.md files, excluding vendored third-party code."""
+    return [p for p in tree if re.search(r"(^|/)(AGENTS|CLAUDE)\.md$", p) and "/" in p and not VENDORED.search(p)][:40]
 
 
 def stale_days(automation: dict[str, str]) -> str:
@@ -432,9 +501,7 @@ def main() -> None:
     styles = link_styles(bodies)
     everything = {**corpus, **automation}
 
-    dco = any(p.endswith("dco.yml") or p == "DCO" for p in tree) or bool(
-        first_match(r"\bDCO\b|Developer Certificate of Origin|Signed-off-by|--signoff", everything)
-    )
+    dco = any(p.endswith("dco.yml") or p == "DCO" for p in tree) or bool(first_match(DCO_TEXT.pattern, everything))
     cla = bool(first_match(r"\bCLA\b|Contributor License Agreement|cla-assistant", everything, 0))
     signed = first_match(
         r"signed commits|commit signing|verified commits|gpg.?sign|signature verification|commits? must be signed",
@@ -456,7 +523,16 @@ def main() -> None:
     release_hit = first_match(
         r"changelog label|add to changelog|no-changelog|release[- ]notes? (?:label|checkbox|section)|\brn/", everything
     )
-    release_note = release or (f"label or checkbox based: {cite(release_hit)}" if release_hit else "none found")
+    block_hit = first_match(r"```\s*release-notes?\b", templates)
+    if release:
+        release_note = release
+    elif block_hit:
+        release_note = "a ```release-note``` block in the PR body (template)"
+    elif release_hit:
+        release_note = f"label or checkbox based: {cite(release_hit)}"
+    else:
+        release_note = "none found"
+    text_hit = forbids_ai_text(corpus)
     issue_req = first_match(
         r"link(?:ed)? (?:to )?an? (?:existing |related )?issue|must (?:have|reference|link|include|close) an? "
         r"(?:related |open )?issue|associated issue|open an issue (?:first|before)|issue first|"
@@ -471,7 +547,9 @@ def main() -> None:
     )
     ping_number = re.search(r"(\d+)\s*hours?", ping_hit[2], re.IGNORECASE) if ping_hit else None
     ping_hours = ping_number.group(1) if ping_number else "none found"
-    decisive = next((e for e in evidence if e.level == level), None)
+    decisive = next((e for e in evidence if e.level == level and e.direct), None) or next(
+        (e for e in evidence if e.level == level), None
+    )
 
     facts = {
         "checked": f"{date.today().isoformat()} (auto, verify)",
@@ -487,7 +565,8 @@ def main() -> None:
         "cla": f"{'yes' if cla else 'no'} (auto, verify)",
         "signed_commits": f"{'yes' if signed else 'no'} (auto, verify)",
         "ascii_only": f"{'yes' if ascii_hit else 'no'} (auto, verify)",
-        "ai_review_replies": f"{'own-words-only' if replies_hit else 'allowed'} (auto, verify)",
+        "ai_review_replies": f"{'own-words-only' if replies_hit or text_hit else 'allowed'} (auto, verify)",
+        "pr_text_by": f"{'user' if text_hit else 'agent draft, user approves'} (auto, verify)",
         "release_note": f"{release_note} (auto, verify)",
         "issue_required": f"{'yes' if issue_req else 'no'} (auto, verify)",
         "internal_labels": f"{cite(internal_hit) if internal_hit else 'none found'} (auto, verify)",
@@ -509,6 +588,7 @@ def main() -> None:
             f"- signed commits: {cite(signed)}",
             f"- ASCII rule: {cite(ascii_hit)}",
             f"- AI-written replies to maintainers: {cite(replies_hit)}",
+            f"- AI-written PR text or communication: {cite(text_hit)}",
             f"- response time: {cite(ping_hit)}",
         ],
         "Bot rules (from workflows and their scripts)": [

@@ -38,6 +38,7 @@ from _config import cache_dir
 from _gh import base_changed_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, use_utf8_stdout
 
 CACHE_VERSION = 2
+FILES_ENDPOINT_CAP = 3000
 WORKERS = 6
 HARD_CONFLICT_LINES = 10
 HOT_FILE_LINES = 30
@@ -65,7 +66,8 @@ def fetch_pr_files(repo: str, number: int) -> dict | None:
                     files[previous] = ranges
     except RuntimeError:
         return None
-    return {"files": files, "added": added}
+    # GitHub's files endpoint stops at 3000 files; a PR that large may touch files the map cannot see.
+    return {"files": files, "added": added, "incomplete": len(files) >= FILES_ENDPOINT_CAP}
 
 
 def build(repo: str) -> dict:
@@ -194,9 +196,14 @@ def main() -> None:
             "a COLD result here does not clear a file"
         )
 
-    if args.expect_contended and not touching(data, args.expect_contended.replace("\\", "/")):
-        print(f"ERROR: sanity check failed, {args.expect_contended} is not in the map; do not trust COLD results")
-        sys.exit(2)
+    huge = sorted(int(n) for n, pr in data["prs"].items() if pr.get("incomplete"))
+    if huge:
+        print(f"WARNING: PRs {huge} change 3000+ files (GitHub's limit); a COLD result may miss them")
+    if args.expect_contended:
+        if not touching(data, args.expect_contended.replace("\\", "/")):
+            print(f"ERROR: sanity check failed, {args.expect_contended} is not in the map; do not trust COLD results")
+            sys.exit(2)
+        print(f"sanity check passed: {args.expect_contended} is in the map")
 
     me = current_login() if args.check else ""
     for spec in args.check:

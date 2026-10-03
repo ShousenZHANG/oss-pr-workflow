@@ -11,6 +11,7 @@ Sources: [PR template](https://github.com/langgenius/dify/blob/main/.github/pull
 - ai_policy_quote: "If this PR was created by an automated agent, add `From <Tool Name>` as the final line" (PR template)
 - disclosure_regex: (?m)^From \S+
 - disclosure_location: body
+- pr_text_by: agent draft, user approves
 - link_style: Fixes #N for single issues; Refs #N under umbrella issues (#41007 under #36544)
 - title_style: conventional (`refactor(api): ...`)
 - open_pr_limit: none

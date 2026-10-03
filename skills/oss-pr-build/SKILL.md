@@ -129,6 +129,14 @@ Reviewers report in this shape; write it to `review.json` in the worktree (not c
 
 Severity: `critical`, `high`, `medium`, `low`. Category: `bug`, `security`, `performance`, `maintainability`, `test`, `style`, `documentation`, `behavior-change`, `compatibility`, `concurrency`, `unused-parameter`, `other`.
 
+**Code no local test can reach** (only an end-to-end run exercises it, or the toolchain is missing and the user declined to install it): the test requirement can be waived only with the user's approval and a merged precedent that shipped the same kind of change without a unit test. Record it, and say so in the PR:
+
+```json
+"test_waiver": {"precedent": "#41600 added the same guard without a unit test",
+                "ci_coverage": "connectivity-test e2e job exercises pod-to-pod-encryption",
+                "approved_by_user": true}
+```
+
 **Resolving findings** (precision is not the goal here; a missed defect costs a rejection, a false alarm costs minutes):
 - Every finding ends `fixed` or `dismissed: <proof>`. A dismissal needs evidence from the diff or the code, not an argument.
 - Findings about **behaviour change, compatibility, concurrency, security, or an unused parameter** can be dismissed only with a test: `dismissed: test: test_old_status_kept passes`.

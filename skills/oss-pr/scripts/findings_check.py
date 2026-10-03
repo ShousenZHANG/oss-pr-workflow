@@ -25,7 +25,9 @@ Rules (exit status 1 on any FAIL):
   - severity and category come from the fixed lists below
   - every finding is resolved: "fixed", or "dismissed: <proof>"
   - protected categories cannot be dismissed by argument alone: the proof must cite a test ("test:")
-  - at least one test is proven, by its saved output, to fail without the fix and pass with it
+  - at least one test is proven, by its saved output, to fail without the fix and pass with it,
+    unless the user approved a "test_waiver" {precedent, ci_coverage, approved_by_user: true}
+    for code no local test can reach
   - categories: bug, security, performance, maintainability, test, style, documentation,
     behavior-change, compatibility, concurrency, unused-parameter, other
 """
@@ -132,6 +134,20 @@ def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
     return out
 
 
+def waiver_ok(waiver: dict | None) -> bool:
+    """A user-approved exception for code no local test can reach (end-to-end only, missing toolchain).
+
+    It must cite a merged precedent that shipped the same kind of change without a
+    unit test, say what CI will exercise, and record that the user approved it.
+    """
+    return bool(
+        waiver
+        and str(waiver.get("precedent", "")).strip()
+        and str(waiver.get("ci_coverage", "")).strip()
+        and waiver.get("approved_by_user") is True
+    )
+
+
 def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str, int], read_text=read_file):
     out: list[Finding] = []
     coverage = {c.get("path"): c for c in report.get("coverage", [])}
@@ -145,7 +161,19 @@ def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str
             out.append(Finding("FAIL", f"{f}: coverage status must be reviewed or skipped"))
     reviewed = sum(1 for f in files if coverage.get(f, {}).get("status") == "reviewed")
 
-    out += check_tests(report.get("tests", []), read_text)
+    waiver = report.get("test_waiver")
+    test_results = check_tests(report.get("tests", []), read_text)
+    if waiver_ok(waiver) and any(r.level == "FAIL" for r in test_results):
+        test_results = [r for r in test_results if r.level != "FAIL"] + [
+            Finding(
+                "WARN",
+                f"test requirement waived by the user: precedent {waiver['precedent']}; "
+                f"CI coverage: {waiver['ci_coverage']}. Say so in the PR.",
+            )
+        ]
+    elif waiver and not waiver_ok(waiver):
+        test_results.append(Finding("FAIL", "test_waiver needs precedent, ci_coverage and approved_by_user: true"))
+    out += test_results
 
     for i, item in enumerate(report.get("findings", []), 1):
         tag = f"finding {i} ({item.get('path')}:{item.get('start_line')})"
@@ -171,7 +199,7 @@ def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str
             proof = resolution[len("dismissed:") :].strip()
             if not proof:
                 out.append(Finding("FAIL", f"{tag}: dismissed without proof"))
-            elif category in PROTECTED and "test:" not in proof:
+            elif category in PROTECTED and "test:" not in proof and not waiver_ok(waiver):
                 out.append(Finding("FAIL", f"{tag}: {category} can only be dismissed with a test ('test: <name>')"))
     out.append(Finding("INFO", f"coverage {reviewed}/{len(files)} files reviewed"))
     return out

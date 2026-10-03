@@ -11,6 +11,7 @@ Sources: [PR template](https://github.com/apache/airflow/blob/main/.github/PULL_
 - ai_policy_quote: "Gen-AI disclosure: the description must include a disclosure" (05_pull_requests.rst)
 - disclosure_regex: (?m)^Generated-by: \S+
 - disclosure_location: body
+- pr_text_by: agent draft, user approves
 - link_style: `closes: #N` or `related: #N`
 - title_style: imperative, no conventional prefix (`Fix clearing with ...`, not `fix: ...`)
 - open_pr_limit: 5

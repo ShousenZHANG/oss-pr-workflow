@@ -33,8 +33,10 @@ For a self-found defect in a repository with `issue_required: yes`: title, a min
 
 ## 3. Draft the PR
 
-- **Title** in the profile's `title_style` (conventional prefix, or imperative with no prefix).
-- **Body** from the repository's own template, every heading kept, the checklist reproduced item for item (never invent or drop items), boxes ticked only when true.
+**Who writes the text.** If the profile says `pr_text_by: user`, the repository does not accept AI-written PR descriptions or communication. Do not write the body. Give the user the facts (what changed, why, the before/after test result, the commands run, the issue link, the disclosure the template asks for) and the template's empty skeleton; the user writes the text, and you run `pr_body_check.py` on what they wrote. Otherwise draft it as below and the user approves it.
+
+- **Title** in the profile's `title_style` (conventional prefix, area prefix, or imperative with no prefix).
+- **Body** from the repository's own template, every heading kept, the checklist reproduced item for item (never invent or drop items), boxes ticked only when true. A box that states something about the person ("I have read the contributing guide", "I signed the CLA") is ticked only after the user confirms it; `pr_body_check.py` lists those for confirmation.
 - **Link** with the profile's `link_style`. Under an umbrella issue that must stay open, a reference (`Refs #N`, `Part of #N`), never a closing keyword.
 - **Disclosure** exactly as the profile requires (`From Claude Code`, `Generated-by: ...`, a disclaimer sentence), placed where the template says. Commit messages carry no AI attribution unless the repository asks for it.
 - Say what changed, why, how it was tested (the commands and the before/after test result), and what is out of scope. Claims must be true of this diff: write numbers only if they appear in the diff or test output.
@@ -57,7 +59,7 @@ gh pr create -R owner/repo --head <user>:<branch> --base <base> --title "<title>
 python ledger.py update <id> --pr <number> --stage ship
 ```
 
-Do not open draft PRs to "park" work: some repositories count drafts toward limits and some auto-close stale drafts; keep unfinished work on the fork branch.
+Do not open draft PRs to "park" work: some repositories count drafts toward limits and some auto-close stale drafts; keep unfinished work on the fork branch. The exception is a repository whose documented workflow is "open as draft, mark ready when CI passes": follow the profile.
 
 ## 5. Follow up
 

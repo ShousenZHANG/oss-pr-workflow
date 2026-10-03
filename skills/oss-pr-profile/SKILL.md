@@ -15,37 +15,39 @@ Scripts are in the `oss-pr` skill next to this one: `../oss-pr/scripts/` from th
 
 ## Steps
 
-1. **Draft.** `python profile_draft.py owner/repo`. It reads the PR template, CONTRIBUTING, root and `.github/` AGENTS.md / CLAUDE.md, AI-policy files, contributing guides, every CI workflow and the scripts they call, and 15 recently merged PRs from outside contributors, and writes `~/.oss-pr/repos/<owner>__<repo>.md` (or `.draft.md` next to an existing profile). Every fact carries `(auto, verify)`.
-2. **Read the evidence, not just the facts.** Open each quoted line under "AI policy evidence" and "Other evidence" in its source file and read the surrounding paragraph. The detector is a pattern matcher: it misses rules phrased unusually and flags lines that only mention AI.
-3. **Settle the AI policy level.** Pick exactly one, quote the sentence that decides it into the profile, and apply the gate:
+1. **Draft.** `python profile_draft.py owner/repo`. It reads the PR template, CONTRIBUTING, root and `.github/` AGENTS.md / CLAUDE.md, AI-policy files, contributing guides (including `Documentation/contributing/`), documents those files link to under an AI / policy / contributing title (even in another repository, such as an organisation's community repo), every CI workflow and the scripts they call, and 15 recently merged PRs from outside contributors. It writes `~/.oss-pr/repos/<owner>__<repo>.md` (or `.draft.md` next to an existing profile). Every fact carries `(auto, verify)`.
+2. **See how PRs actually die, before judging the policy.** `python base_rate.py owner/repo --days 30 --show-closed 20`. It prints who closed each recent outside PR and why, and counts the closures that mention AI use. Practice can be stricter than the written policy: in one repository at least 10 of 58 closed outside PRs in a month were closed because the patch was AI-written, while the written policy only asked for disclosure.
+3. **Read the evidence, not just the facts.** Open each quoted line under "AI policy evidence" and "Other evidence" in its source file and read the surrounding paragraph. The detector is a pattern matcher: it misses rules phrased unusually and flags lines that only mention AI.
+4. **Settle the AI policy level.** Pick exactly one, quote the sentence that decides it into the profile, and apply the gate:
 
    | Level | Example wording | Gate |
    |---|---|---|
    | `banned` | "we do not accept AI-generated contributions" | **Stop.** Tell the user; do not continue in this repo. |
-   | `banned-for-newcomers` | "first-time contributors must not use code agents" | Run `base_rate.py owner/repo --no-split`; it prints the user's status. NEWCOMER: stop. RETURNING: continue as `disclosure`. |
+   | `banned-for-newcomers` | "first-time contributors must not use code agents"; or maintainers close newcomers' AI-written patches in practice (step 2) | The user's status is printed by `base_rate.py`. NEWCOMER: stop. RETURNING: continue as `disclosure` or `human-in-loop`. |
    | `issue-restricted` | "only issues labelled `help wanted` with acceptance criteria" | Continue; write the condition into the profile; scouting may only offer issues that meet it. |
-   | `human-in-loop` | "autonomous agents are not allowed; a human must review every change" | Continue; before submission the user must confirm they read every changed line, and the PR says so truthfully. |
+   | `human-in-loop` | "autonomous agents are not allowed; a human must review every change"; "write the code yourself, AI may assist" | Continue; before submission the user must confirm they read (and, where required, wrote) every changed line, and the PR says so truthfully. |
    | `disclosure` | "state in the PR description if AI tools were used" | Continue; copy the exact required wording. |
    | `none` | no rule found | Continue; disclose briefly anyway. |
 
-   When two readings are plausible, take the stricter one and ask the user.
-4. **Read the bot rules.** The "Bot rules" section quotes workflow files and the scripts they run. Automation often decides more than the documents: closing PRs without a triaged issue, closing when template sections are missing, stale timers, "AI slop" detection, protected paths outsiders may not touch. Turn each real rule into a fact, a path rule, or a "How PRs die here" row.
-5. **Fill in what the script cannot know.**
-   - `disclosure_regex`: a regex that matches the required disclosure line, built from the template and the disclosure lines seen in merged PRs (for example `(?m)^From \S+` or `Generated-by:`). Write `none required` when the repository asks for nothing. The draft's `FILL IN` placeholder makes `pr_body_check.py` fail until this is done.
+   When two readings are plausible, take the stricter one and ask the user. When step 2 shows AI-related closures that the written policy does not explain: if the closed authors were mostly newcomers, use `banned-for-newcomers`; otherwise move one row up the table. Tell the user which closures drove the decision.
+5. **Read the bot rules.** The "Bot rules" section quotes workflow files and the scripts they run. Automation often decides more than the documents: closing PRs without a triaged issue, closing when template sections are missing, stale timers, "AI slop" detection, protected paths outsiders may not touch, CI that only starts after a member comments. Turn each real rule into a fact, a path rule, or a "How PRs die here" row.
+6. **Fill in what the script cannot know.**
+   - `disclosure_regex`: a regex that matches the required disclosure line, built from the template and the disclosure lines seen in merged PRs (for example `(?m)^From \S+`, `Generated-by:`, `AIL:\s*\d`). Write `none required` when the repository asks for nothing. The draft's `FILL IN` placeholder makes `pr_body_check.py` fail until this is done.
    - `disclosure_location`: `body`, `commit-trailer`, or both. Some repositories want a `Co-Authored-By` trailer instead of a PR-body line.
-   - `link_style`: what merged PRs actually write. On umbrella issues that must stay open, a closing keyword (`Fixes #N`) can close the issue or get the PR deduplicated; check which keyword merged PRs under umbrellas used.
+   - `pr_text_by`: `user` when the repository forbids AI-written PR descriptions or communication; then phase 5 hands the user facts and a skeleton instead of a finished text.
    - `ai_review_replies`: `own-words-only` when the repo forbids AI-written answers to maintainers.
+   - `link_style`: what merged PRs actually write. On umbrella issues that must stay open, a closing keyword (`Fixes #N`) can close the issue or get the PR deduplicated; check which keyword merged PRs under umbrellas used. Some repositories also want the reference in the commit message.
    - Conditions for `issue-restricted` repos, label requirements (e.g. an issue must carry `ready`), and `internal_labels` that mark issues outsiders should not take.
-6. **Path rules.** Add a row per directory with its own conventions: scoped AGENTS.md files (the script lists them), guard scripts CI runs for a directory, generated-code directories. These rows are printed by `rules_for.py` for the files a change touches.
-7. **Local checks.** From the CI commands the script listed, write the commands that reproduce every CI job locally. Mark the ones the documented local lint target does not run (in one repo three AST guard scripts ran only in CI and turned PRs red).
-8. **How PRs die here.** `python base_rate.py owner/repo --days 30 --show-closed 15`. Classify each closing comment: bot rule (which), duplicate, merits, stale, conflict, CLA. One table row per cause with an example PR.
-9. **Show the profile to the user** and let them correct it. Then remove `(auto, verify)` from the facts they confirmed and set `checked:` to today.
+7. **Path rules.** Add a row per directory with its own conventions: scoped AGENTS.md files (the script lists them, vendored code excluded), guard scripts CI runs for a directory, generated-code directories. These rows are printed by `rules_for.py` for the files a change touches.
+8. **Local checks.** From the CI commands the script listed, write the commands that reproduce every CI job locally. Mark the ones the documented local lint target does not run (in one repo three AST guard scripts ran only in CI and turned PRs red), and requirements such as "every commit must build on its own".
+9. **How PRs die here.** From step 2, one table row per cause (bot rule, duplicate, merits, AI policy in practice, stale, conflict, CLA, DCO) with an example PR.
+10. **Show the profile to the user** and let them correct it. Then remove `(auto, verify)` from the facts they confirmed and set `checked:` to today.
 
 ## Profile shape
 
 Copy the layout of `../oss-pr/examples/repos/_template.md`. The `## Facts` block is read by the scripts (`- key: value` lines), so keep its keys:
 
-`checked, ai_policy, ai_policy_quote, disclosure_regex, disclosure_location, link_style, title_style, open_pr_limit, dco, cla, signed_commits, ascii_only, ai_review_replies, release_note, issue_required, internal_labels, stale_close, min_ping_hours, merged_pr_files_p90, merged_pr_lines_p90`
+`checked, ai_policy, ai_policy_quote, disclosure_regex, disclosure_location, pr_text_by, link_style, title_style, open_pr_limit, dco, cla, signed_commits, ascii_only, ai_review_replies, release_note, issue_required, internal_labels, stale_close, min_ping_hours, merged_pr_files_p90, merged_pr_lines_p90`
 
 ## Exit check
 

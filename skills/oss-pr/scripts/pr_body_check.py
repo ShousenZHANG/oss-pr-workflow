@@ -96,6 +96,25 @@ def check_template(body: str, template: str) -> list[Finding]:
     return findings
 
 
+def check_release_block(body: str, template: str) -> list[Finding]:
+    """Templates with a ```release-note block expect it filled in, not deleted."""
+    if re.search(r"```\s*release-notes?\b", template) and not re.search(r"```\s*release-notes?\b", body):
+        return [Finding("FAIL", "the template's ```release-note block is missing from the body")]
+    return []
+
+
+def check_attestations(body: str) -> list[Finding]:
+    """Ticked boxes that state something about the person ("I have read ...") can only be confirmed by the user."""
+    findings = []
+    for line in strip_comments(body).splitlines():
+        match = re.match(r"^\s*[-*]\s*\[[xX]\]\s*(.+?)\s*$", line)
+        if match and re.match(r"(?i)(?:i\b|i'(?:ve|m)\b|my\b|we\b)", match.group(1)):
+            findings.append(
+                Finding("WARN", f"ticked statement about the user, confirm with them: {match.group(1)[:80]!r}")
+            )
+    return findings
+
+
 def check_links(body: str, issue: int | None, umbrella: bool, issue_required: bool) -> list[Finding]:
     findings = []
     if issue is None:
@@ -221,6 +240,8 @@ def main() -> None:
         findings.append(Finding("WARN", "no PR template found; run profile_draft.py or pass --template"))
     else:
         findings += check_template(body, template)
+        findings += check_release_block(body, template)
+    findings += check_attestations(body)
     findings += check_links(body, args.issue, args.umbrella, facts.get("issue_required", "").startswith("yes"))
     if profile is not None:
         findings += check_disclosure(body, facts)

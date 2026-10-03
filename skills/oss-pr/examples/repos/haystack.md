@@ -11,6 +11,7 @@ Sources: [PR template](https://github.com/deepset-ai/haystack/blob/main/.github/
 - ai_policy_quote: "If your PR was fully AI-generated, add a short disclaimer in the PR description" (CONTRIBUTING.md)
 - disclosure_regex: (?i)AI (assistant|assistance)
 - disclosure_location: body
+- pr_text_by: agent draft, user approves
 - link_style: `- fixes #N` (template)
 - title_style: conventional (`fix:`, `feat:`, `!` for breaking)
 - open_pr_limit: 1
