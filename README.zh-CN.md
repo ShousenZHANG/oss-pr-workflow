@@ -17,7 +17,7 @@
 | 4 | `oss-pr-build` | 在单独的工作目录里先写测试再实现，本地复现 CI，独立审查 | 测试在撤掉修复后会失败；每个文件都审过；检查全部通过 |
 | 5 | `oss-pr-ship` | 控制节奏，起草并检查 PR 文字，你确认后才发出，之后持续跟进 | 节奏检查放行；你确认了最终文字 |
 
-**任何别人看得到的动作，都要你确认那段确切的文字之后才执行**：评论、开 issue、开 PR、回复审查意见、催审。唯一自动执行的网络写操作，是推送到你自己的 fork。
+**任何别人看得到的动作，都要你确认那段确切的文字之后才执行**：评论、开 issue、开 PR、回复审查意见、催审。唯一自动执行的网络写操作，是推送到你自己的 fork；第一次创建这个 fork 之前也会先问你。
 
 ## 脚本
 
@@ -43,7 +43,7 @@
 
 或者把 `skills/` 下的所有目录复制到 `~/.claude/skills/`。要保持它们并排放置，因为各阶段的 Skill 会调用 `oss-pr/scripts/` 里的脚本。
 
-需要 Python 3.10+ 和已登录的 [GitHub CLI](https://cli.github.com/)（`gh auth status`）。不需要安装 Python 包。
+需要 Python 3.10+ 和已登录的 [GitHub CLI](https://cli.github.com/)（`gh auth status`）。不需要安装 Python 包。技能里的命令按 POSIX shell 写，Windows 上请用 Git Bash 或 WSL。
 
 ## 使用
 
@@ -69,6 +69,8 @@
 - 只由私有机器人执行、或只存在于维护者心里的规定，在有人因此被关 PR 之前是看不到的；`base_rate.py` 能从被关 PR 的评论里把它们找出来，但前提是这件事已经发生在别人身上。
 - "实现与测试"阶段只在 Python 仓库上完整跑通过。Go 和 TypeScript 仓库因为本机没装工具链，只验证到"本地跑不了检查时，交给使用者决定"这一步。
 - 通过率估计取决于样本量：外部 PR 很少的仓库，估计就会很宽、很弱，脚本会标出样本量 n。
+- 行级冲突检查会先用 GitHub 的 compare 接口，把别人 PR 的行号换算到当前主分支上；这个接口最多列 300 个文件。很早就分出去的 PR 常常只能给出 `UNKNOWN`，需要自己去读那个 PR 的改动。
+- 测试结果只有在日志里能看到这个测试自己的结果行时才算数，所以测试要用详细模式跑。能识别 pytest、unittest、go test、cargo、jest/vitest 的格式；Maven/Surefire 默认不打印通过的测试名。
 
 ## 开发
 
@@ -78,7 +80,7 @@ python -m pytest
 ruff check . && ruff format --check .
 ```
 
-测试里包含 10 个回归用例，每个都对应一次真实发生过的失败，以及现在负责拦住它的检查（`tests/test_regressions.py`）。
+测试里包含 10 个回归用例，每个都对应一次真实发生过的失败，以及现在负责拦住它的检查（`tests/test_regressions.py`）；另有 v1.0.0 审计发现的、检查本该拦住却放过的情况（`tests/test_audit_fixes.py`）。
 
 ## 致谢
 

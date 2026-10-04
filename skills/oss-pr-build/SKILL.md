@@ -16,7 +16,7 @@ Scripts are in `../oss-pr/scripts/` from this skill's directory; call them by ab
 ## 1. Set up
 
 ```bash
-gh repo fork owner/repo --clone=false            # once, when the user has no fork yet
+gh repo fork owner/repo --clone=false            # once, when the user has no fork yet and has agreed to create it
 git -C <clone> fetch upstream
 git -C <clone> remote set-head upstream --auto                   # record the remote's default branch
 git -C <clone> symbolic-ref --short refs/remotes/upstream/HEAD   # the default branch: main, master, develop...

@@ -17,7 +17,7 @@ In busy repositories most rejected PRs are not rejected for code quality. They d
 | 4 | `oss-pr-build` | Implements in a separate worktree, test first, reproduces CI, independent review | Test seen failing without the fix; every file reviewed; checks pass |
 | 5 | `oss-pr-ship` | Paces, drafts and checks the PR text, opens it after your approval, follows up | Pacing allows it; you approve the exact text |
 
-**Nothing anyone else can see happens without your approval of that exact text**: comments, issues, PRs, review replies, pings. Pushing to your own fork is the only automatic network write.
+**Nothing anyone else can see happens without your approval of that exact text**: comments, issues, PRs, review replies, pings. Pushing to your own fork is the only automatic network write; creating that fork in the first place is asked first.
 
 ## Scripts
 
@@ -58,7 +58,7 @@ As a Claude Code plugin:
 
 Or copy every directory under `skills/` into `~/.claude/skills/` (keep them side by side: the phase skills use the scripts in `oss-pr/scripts/`).
 
-Requirements: Python 3.10+ and the [GitHub CLI](https://cli.github.com/), logged in (`gh auth status`). No Python packages.
+Requirements: Python 3.10+ and the [GitHub CLI](https://cli.github.com/), logged in (`gh auth status`). No Python packages. The commands in the skills are written for a POSIX shell; on Windows, use Git Bash or WSL.
 
 ## Use
 
@@ -84,6 +84,8 @@ On first use you are asked a few questions (which sources to scout, whether ques
 - Policy enforced only by private bots or in maintainers' heads is invisible until it shows up in closing comments; `base_rate.py` surfaces those, but only after it has happened to someone.
 - The build phase has been exercised end to end on a Python repository. On Go and TypeScript repositories it was verified only up to "checks cannot run locally, user decides", because the toolchains were not installed.
 - Merge-rate estimates are as good as their sample: a repository with few outside PRs gives a wide, weak estimate, and the scripts say so with n.
+- Line-level conflict checks move an open PR's lines onto the current base through GitHub's compare API, which lists at most 300 files. For a PR that branched long ago the answer is often `UNKNOWN`, and you read that PR's diff yourself.
+- A test result counts only when the log names the test on its own result line, so tests must run verbose. The formats of pytest, unittest, go test, cargo and jest/vitest are recognised; Maven/Surefire does not print passing test names by default.
 
 ## Development
 
@@ -93,7 +95,7 @@ python -m pytest
 ruff check . && ruff format --check .
 ```
 
-The tests include ten regression cases, each a real failure from past contribution rounds and the gate that now catches it (`tests/test_regressions.py`).
+The tests include ten regression cases, each a real failure from past contribution rounds and the gate that now catches it (`tests/test_regressions.py`), and the cases an audit of v1.0.0 found a gate letting through (`tests/test_audit_fixes.py`).
 
 ## Credits
 

@@ -104,6 +104,7 @@ python contention_map.py <owner>/<repo> --check src/file.py --check tests/test_f
 - `--expect-contended` is a sanity check; if it fails, the map is broken and every COLD result is meaningless.
 - A keyword search over PR titles is not a substitute (PR bodies rarely list files), and neither is `gh pr view --json files` (cut off at 100 files, exactly on the big refactor PRs).
 - A map with failed fetches can reject a target but never clear one.
+- With `--check PATH:LINES`, each open PR's lines are first moved onto the current base (they are numbered on the base it branched from). `UNKNOWN` means that move was not possible: the PR branched long ago or the base rewrote those lines. Read that PR's diff yourself; `UNKNOWN` never clears a target.
 - `YOUR OWN PR` on a shared file means the next PR waits until that one merges.
 
 ### L3 - Hunk level
