@@ -222,6 +222,19 @@ def base_changed_ranges(patch: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def hunk_counts(patch: str) -> list[tuple[int, int, int, int]]:
+    """(old start, old length, new start, new length) of every hunk header; an omitted length is 1."""
+    return [
+        (
+            int(m.group(1)),
+            int(m.group(2)) if m.group(2) is not None else 1,
+            int(m.group(3)),
+            int(m.group(4)) if m.group(4) is not None else 1,
+        )
+        for m in _HUNK_HEADER.finditer(patch or "")
+    ]
+
+
 def new_side_ranges(patch: str) -> list[tuple[int, int]]:
     """New-file line ranges each hunk touches; a pure deletion (`+c,0`) yields no range."""
     ranges = []

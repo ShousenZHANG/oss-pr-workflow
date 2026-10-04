@@ -4,12 +4,14 @@ import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 
+import contention_map
 import issue_prs
 import pacing
 import pr_status
 import pytest
 from _config import load_profile, parse_facts, profile_status, scope_globs, split_globs
 from conftest import git, run
+from contention_map import check, shift_ranges
 from diff_check import added_lines, check_commits
 from findings_check import changed_ranges, check_tests
 from ledger import Entry, parse, render
@@ -343,3 +345,59 @@ class TestFailedLookupsAreShown:
         out = capsys.readouterr().out
         assert exit_info.value.code == 1
         assert "#2 could not be read" in out and "partial" in out and "rate 100.0%" not in out, out
+
+
+class TestContentionAcrossAMovedBase:
+    """An open PR changed line 50; main then gained 100 lines at the top; your change is at line 150.
+
+    The PR's line numbers are relative to where it branched, so 50 and 150 are the same line: a real
+    merge conflict that the map called DISTINCT.
+    """
+
+    DATA = {"prs": {"7": {"title": "t", "author": "other", "updated_at": "2026-10-01", "files": {"a.py": [[50, 50]]}}}}
+    INSERT_100 = "@@ -0,0 +1,100 @@\n" + "+x\n" * 100
+
+    def test_ranges_follow_insertions_above_them(self):
+        assert shift_ranges([[50, 50]], self.INSERT_100) == [[150, 150]]
+        assert shift_ranges([[50, 60]], "@@ -10,2 +10,0 @@\n-a\n-b\n") == [[48, 58]]
+        assert shift_ranges([[5, 5]], "@@ -70 +70 @@\n-a\n+b\n") == [[5, 5]]
+
+    def test_lines_rewritten_on_the_base_cannot_be_mapped(self):
+        assert shift_ranges([[50, 50]], "@@ -49,3 +49,3 @@\n-a\n-b\n-c\n+a\n+b\n+c\n") is None
+
+    def test_check_maps_before_judging(self, capsys):
+        check(self.DATA, "a.py", [150], drift=lambda number, pr, path: self.INSERT_100)
+        out = capsys.readouterr().out
+        assert "HARD CONFLICT" in out and "DISTINCT" not in out, out
+
+    def test_unreadable_drift_is_unknown(self, capsys):
+        check(self.DATA, "a.py", [150], drift=lambda number, pr, path: None)
+        out = capsys.readouterr().out
+        assert "UNKNOWN" in out and "DISTINCT" not in out, out
+
+    def test_unchanged_file_keeps_the_old_answer(self, capsys):
+        check(self.DATA, "a.py", [150], drift=lambda number, pr, path: "")
+        assert "DISTINCT (100 lines away)" in capsys.readouterr().out
+
+
+def test_base_drift_reads_one_compare_per_pr(monkeypatch):
+    calls = []
+    files = [
+        {"filename": "a.py", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+        {"filename": "new.py", "previous_filename": "old.py"},
+    ]
+
+    def fake(args):
+        calls.append(args)
+        return {"files": files}
+
+    monkeypatch.setattr(contention_map, "gh_json", fake)
+    drift = contention_map.base_drift("o/r", compare_cap=3)
+    pr = {"head_sha": "abc", "base_ref": "main"}
+    assert drift("1", pr, "a.py").startswith("@@")
+    assert drift("1", pr, "b.py") == ""
+    assert drift("1", pr, "old.py") is None  # renamed without a patch: unknown
+    assert len(calls) == 1 and calls[0][1] == "repos/o/r/compare/abc...main"
+    assert contention_map.base_drift("o/r", compare_cap=2)("1", pr, "b.py") is None  # full list: unknown
+    monkeypatch.setattr(contention_map, "gh_json", lambda args: None)
+    assert contention_map.base_drift("o/r")("1", pr, "a.py") is None

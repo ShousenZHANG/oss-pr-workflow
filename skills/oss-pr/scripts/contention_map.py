@@ -13,7 +13,11 @@ File lists come from the REST `pulls/<n>/files` endpoint with pagination.
 `gh pr view --json files` stops at 100 files per PR, so a large refactor PR
 that also touches your file can silently drop out of a map built that way.
 Line ranges are the base-branch lines each PR actually changes (context lines
-around a hunk are not counted).
+around a hunk are not counted). They are numbered on the base the PR branched
+from, so before a line is compared they are moved onto the current base with
+GitHub's compare API (how the base changed the file since that PR branched).
+When that cannot be told, or the base rewrote those very lines, the answer is
+UNKNOWN, not DISTINCT.
 
 A map with failed PRs can reject a target but cannot clear one; --check says
 so whenever coverage is incomplete. --expect-contended is a sanity check: name
@@ -35,10 +39,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _config import cache_dir
-from _gh import base_changed_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, run_main, use_utf8_stdout
+from _gh import (
+    base_changed_ranges,
+    check_api_budget,
+    current_login,
+    gh_api_pages,
+    gh_json,
+    hunk_counts,
+    parse_iso,
+    run_main,
+    use_utf8_stdout,
+)
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3  # 3: head_sha and base_ref per PR, for mapping lines onto the current base
 FILES_ENDPOINT_CAP = 3000
+COMPARE_FILES_CAP = 300  # the compare endpoint lists at most 300 files
 WORKERS = 6
 HARD_CONFLICT_LINES = 10
 HOT_FILE_LINES = 30
@@ -91,6 +106,8 @@ def build(repo: str) -> dict:
             "author": (pr.get("user") or {}).get("login", "ghost"),
             "updated_at": pr.get("updated_at", ""),
             "draft": pr.get("draft", False),
+            "head_sha": (pr.get("head") or {}).get("sha", ""),
+            "base_ref": (pr.get("base") or {}).get("ref", ""),
             **result,
         }
     data = {
@@ -115,6 +132,38 @@ def distance(line: int, ranges: list[list[int]]) -> int:
         d = 0 if start <= line <= end else min(abs(line - start), abs(line - end))
         best = d if best is None else min(best, d)
     return best if best is not None else 10**9
+
+
+def shift_line(number: int, hunks: list[tuple[int, int, int]]) -> int | None:
+    """Where an old base line sits on the current base, given the base's own hunks since then
+    as (old start, old length, new length); None when the base rewrote that line itself."""
+    delta = 0
+    for old_start, old_len, new_len in hunks:
+        if old_len == 0:  # `-k,0`: inserted after old line k
+            if number <= old_start:
+                return number + delta
+        elif number < old_start:
+            return number + delta
+        elif number < old_start + old_len:
+            return None
+        delta += new_len - old_len
+    return number + delta
+
+
+def shift_ranges(ranges: list[list[int]], base_patch: str) -> list[list[int]] | None:
+    """Map an open PR's ranges (numbered on the base it branched from) onto the current base.
+
+    `base_patch` is how the base branch changed the file since that PR's merge base.
+    None when a range end falls on lines the base itself rewrote: no honest mapping exists.
+    """
+    hunks = sorted((old_start, old_len, new_len) for old_start, old_len, _new_start, new_len in hunk_counts(base_patch))
+    shifted = []
+    for start, end in ranges:
+        new_start, new_end = shift_line(start, hunks), shift_line(end, hunks)
+        if new_start is None or new_end is None:
+            return None
+        shifted.append([new_start, new_end])
+    return shifted
 
 
 def verdict(line: int, ranges: list[list[int]] | None) -> str:
@@ -144,7 +193,37 @@ def parse_check(spec: str) -> tuple[str, list[int]]:
     return spec.replace("\\", "/"), []
 
 
-def check(data: dict, path: str, lines: list[int], me: str = "") -> None:
+def base_drift(repo: str, compare_cap: int = COMPARE_FILES_CAP):
+    """drift(number, pr, path): how the base branch changed `path` since that PR's merge base.
+
+    "" when it did not change, the patch when it did, None when that cannot be told
+    (failed request, no patch, or the 300-file compare list is full and the file is not in it).
+    One compare request per PR, cached for the run.
+    """
+    cache: dict[str, list | None] = {}
+
+    def drift(number: str, pr: dict, path: str) -> str | None:
+        if number not in cache:
+            head, base = pr.get("head_sha"), pr.get("base_ref")
+            data = gh_json(["api", f"repos/{repo}/compare/{head}...{base}"]) if head and base else None
+            cache[number] = None if data is None else data.get("files") or []
+        files = cache[number]
+        if files is None:
+            return None
+        for f in files:
+            if path in (f.get("filename"), f.get("previous_filename")):
+                return f.get("patch")
+        return None if len(files) >= compare_cap else ""
+
+    return drift
+
+
+def check(data: dict, path: str, lines: list[int], me: str = "", drift=None) -> None:
+    """Print who touches `path` and, for each of your lines, how close the other PR's change is.
+
+    The other PR's lines are numbered on the base it branched from; `drift` (see base_drift)
+    maps them onto the current base first. Without that mapping a line count is not comparable.
+    """
     hits = touching(data, path)
     if not hits:
         print(f"COLD   {path}  (no open PR touches it)")
@@ -161,6 +240,19 @@ def check(data: dict, path: str, lines: list[int], me: str = "") -> None:
         print(f"        {pr['title'][:90]}")
         if is_own(pr, me):
             print("        YOUR OWN PR: open the next one after this merges, or rebase and re-check the exact lines")
+        if lines and ranges is not None and drift is not None:
+            patch = drift(n, pr, path)
+            if patch is None:
+                for line in lines:
+                    print(f"        your line {line}: UNKNOWN (cannot tell how the base moved since #{n} branched)")
+                continue
+            if patch:
+                ranges = shift_ranges(ranges, patch)
+                if ranges is None:
+                    for line in lines:
+                        print(f"        your line {line}: UNKNOWN (the base rewrote #{n}'s lines; read both diffs)")
+                    continue
+                print(f"        on the current base: lines {', '.join(f'{a}-{b}' for a, b in ranges)}")
         for line in lines:
             print(f"        your line {line}: {verdict(line, ranges)}")
 
@@ -208,9 +300,10 @@ def main() -> None:
         print(f"sanity check passed: {args.expect_contended} is in the map")
 
     me = current_login() if args.check else ""
+    drift = base_drift(args.repo)
     for spec in args.check:
         path, lines = parse_check(spec)
-        check(data, path, lines, me)
+        check(data, path, lines, me, drift)
 
 
 if __name__ == "__main__":
