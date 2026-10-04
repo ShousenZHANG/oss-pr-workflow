@@ -1,7 +1,7 @@
 {
   "name": "oss-pr-workflow",
   "description": "Take any GitHub repository from issue scan to merged pull request: repository profile, target scouting, recon, build with self-review, and paced submission, with scripted gates between each phase.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": {
     "name": "ShousenZHANG"
   },

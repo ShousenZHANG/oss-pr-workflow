@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "End-to-end open source pull request workflow with scripted gates",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "plugins": [
     {
       "name": "oss-pr-workflow",
       "source": "./",
       "description": "Take any GitHub repository from issue scan to merged pull request: repository profile, target scouting, recon, build with self-review, and paced submission, with scripted gates between each phase.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "ShousenZHANG"
       },
