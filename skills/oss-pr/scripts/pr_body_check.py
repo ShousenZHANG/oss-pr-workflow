@@ -53,11 +53,13 @@ def strip_comments(text: str) -> str:
 
 
 def normalize(text: str) -> str:
+    """Lower-case words only; letters of every script survive (a Chinese checklist item keeps its meaning)."""
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return re.sub(r"[\W_]+", " ", text.lower()).strip()
 
 
 def template_headings(template: str) -> list[str]:
+    """Markdown `#` headings and bold-only lines, outside HTML comments (also used on the body)."""
     headings = []
     for line in strip_comments(template).splitlines():
         match = HEADING.match(line) or BOLD_HEADING.match(line)
@@ -77,9 +79,11 @@ def same_item(template_item: str, body_item: str) -> bool:
 
 def check_template(body: str, template: str) -> list[Finding]:
     findings = []
-    body_norm = normalize(strip_comments(body))
+    # A heading is present only as a heading: "Summary" mentioned in a sentence does not count.
+    body_headings = [normalize(h) for h in template_headings(body)]
     for heading in template_headings(template):
-        if normalize(heading) and normalize(heading) not in body_norm:
+        wanted = normalize(heading)
+        if wanted and not any(h == wanted or h.startswith(wanted + " ") for h in body_headings):
             findings.append(Finding("FAIL", f"template heading missing: {heading!r}"))
     wanted = [(normalize(item), item) for item in checklist(template)]
     have = [(normalize(item), item) for item in checklist(body)]
@@ -174,8 +178,13 @@ def check_disclosure(body: str, facts: dict[str, str]) -> list[Finding]:
         regex = re.compile(pattern)
     except re.error as error:
         return [Finding("FAIL", f"profile disclosure_regex is not a valid regex: {error}")]
-    if not regex.search(body):
-        return [Finding("FAIL", f"required AI disclosure not found (profile disclosure_regex: {pattern})")]
+    # Only text readers can see counts: a disclosure inside an HTML comment is hidden on the PR page.
+    if not regex.search(strip_comments(body)):
+        return [
+            Finding(
+                "FAIL", f"required AI disclosure not found in the visible text (profile disclosure_regex: {pattern})"
+            )
+        ]
     return []
 
 

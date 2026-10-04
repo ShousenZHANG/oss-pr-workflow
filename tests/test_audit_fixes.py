@@ -11,6 +11,7 @@ from diff_check import added_lines, check_commits
 from findings_check import changed_ranges, check_tests
 from ledger import Entry, parse, render
 from pacing import Limits, MyPR, decide
+from pr_body_check import check_disclosure, check_template
 from profile_draft import classify_ai_policy, ranked_commands, workflow_commands
 
 
@@ -265,6 +266,32 @@ class TestSmallParsers:
         values[field] = "line one\r\nline two"
         rows = parse(render([Entry(**values)]))
         assert len(rows) == 1 and getattr(rows[0], field) == "line one line two"
+
+
+class TestPrBodyReadsWhatReadersSee:
+    TEMPLATE = "## Summary\n\n## Checklist\n\n- [ ] I added tests\n"
+    FACTS = {"ai_policy": "disclosure", "disclosure_regex": "(?i)AI[- ]?assist"}
+
+    def test_heading_named_in_prose_is_not_a_heading(self):
+        body = "We list a Summary and a Checklist here.\n\n- [x] I added tests\n"
+        messages = [f.message for f in check_template(body, self.TEMPLATE)]
+        assert sum("heading missing" in m for m in messages) == 2, messages
+
+    def test_real_headings_pass(self):
+        body = "## Summary\n\nFix.\n\n### Checklist\n\n- [x] I added tests\n"
+        assert check_template(body, self.TEMPLATE) == []
+
+    def test_non_latin_checklist_items_are_compared(self):
+        """normalize() deleted every CJK character, so any Chinese item matched any other."""
+        template = "## 检查\n\n- [ ] 我已添加测试\n"
+        body = "## 检查\n\n- [x] 我已更新文档\n"
+        messages = [f.message for f in check_template(body, template)]
+        assert any("missing or reworded" in m for m in messages), messages
+
+    def test_disclosure_hidden_in_a_comment_does_not_count(self):
+        body = "Fix the crash.\n\n<!-- AI-assisted -->\n"
+        assert [f.level for f in check_disclosure(body, self.FACTS)] == ["FAIL"]
+        assert check_disclosure("Fix the crash.\n\nAI-assisted with Claude Code.\n", self.FACTS) == []
 
 
 class TestCiCommands:
