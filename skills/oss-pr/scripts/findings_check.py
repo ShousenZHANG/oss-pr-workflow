@@ -19,9 +19,10 @@ upstream default branch). The report is JSON:
 }
 
 Rules (exit status 1 on any FAIL):
-  - every changed file appears in coverage; a skipped file needs a reason
-  - every finding points at a file in the diff and at lines that exist in the new file;
-    lines outside the changed hunks are a WARN (comments should be about changed code)
+  - the change is committed: uncommitted edits to tracked files, or no change at all, FAIL
+  - every changed file appears in coverage, deleted files included; a skipped file needs a reason
+  - every finding points at a file in the diff and at lines that exist in the new file
+    (the last version, for a deleted file); lines outside the changed hunks are a WARN
   - severity and category come from the fixed lists below
   - every finding is resolved: "fixed", or "dismissed: <proof>"
   - protected categories cannot be dismissed by argument alone: the proof must cite a test ("test:")
@@ -40,7 +41,16 @@ import re
 import sys
 from dataclasses import dataclass
 
-from _gh import base_side_ranges, default_base, git, new_side_ranges, run_git_or_exit, split_diff, use_utf8_stdout
+from _gh import (
+    base_side_ranges,
+    default_base,
+    git,
+    new_side_ranges,
+    run_git_or_exit,
+    split_diff,
+    use_utf8_stdout,
+    worktree_findings,
+)
 
 SEVERITIES = {"critical", "high", "medium", "low"}
 CATEGORIES = {
@@ -249,15 +259,24 @@ def main() -> None:
             report = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
         sys.exit(f"ERROR: cannot read {args.report}: {error}")
-    files = [f for f in run_git_or_exit(["diff", "--name-only", "--diff-filter=d", f"{base}...HEAD"]).splitlines() if f]
+    files = [f for f in run_git_or_exit(["diff", "--name-only", "-z", f"{base}...HEAD"]).split("\0") if f]
+    deleted = {
+        f for f in run_git_or_exit(["diff", "--name-only", "-z", "--diff-filter=D", f"{base}...HEAD"]).split("\0") if f
+    }
     ranges = changed_ranges(run_git_or_exit(["diff", "-U0", f"{base}...HEAD"]))
+    merge_base = run_git_or_exit(["merge-base", base, "HEAD"]).strip()
     line_counts = {}
     for f in files:
+        # A deleted file's findings point at its last version, on the base side.
+        revision = merge_base if f in deleted else "HEAD"
         try:
-            line_counts[f] = len(git(["show", f"HEAD:{f}"]).splitlines())
+            line_counts[f] = len(git(["show", f"{revision}:{f}"]).splitlines())
         except RuntimeError:
             line_counts[f] = 0
-    results = validate(report, files, ranges, line_counts)
+    results = [Finding(level, message) for level, message in worktree_findings()]
+    if not files:
+        results.append(Finding("FAIL", f"no committed change against {base}; there is nothing to review"))
+    results += validate(report, files, ranges, line_counts)
     for r in results:
         print(f"{r.level}: {r.message}")
     failed = any(r.level == "FAIL" for r in results)

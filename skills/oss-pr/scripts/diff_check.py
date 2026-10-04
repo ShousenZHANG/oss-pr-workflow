@@ -6,6 +6,8 @@ Run inside the clone, on the feature branch. FAIL lines block the push; WARN
 lines need a written reason in the PR notes or a fix.
 
 Checks:
+  - uncommitted changes to tracked files and an empty change (both FAIL: only commits are checked);
+    untracked files are listed
   - files outside the plan (when --plan is given)
   - lock files and generated files (DO NOT EDIT / @generated markers)
   - likely secrets in added lines
@@ -27,7 +29,7 @@ import sys
 from dataclasses import dataclass
 
 from _config import glob_match, load_profile, scope_globs, truthy
-from _gh import default_base, run_git_or_exit, split_diff, use_utf8_stdout
+from _gh import default_base, run_git_or_exit, split_diff, use_utf8_stdout, worktree_findings
 
 LOCK_FILES = (
     "**/package-lock.json",
@@ -190,7 +192,7 @@ def main() -> None:
     facts, _rules, profile = load_profile(args.repo)
     if profile is None:
         print(f"WARN: no profile for {args.repo}; DCO, ASCII, signing and size checks use defaults")
-    files = [f for f in run_git_or_exit(["diff", "--name-only", f"{base}...HEAD"]).splitlines() if f.strip()]
+    files = [f for f in run_git_or_exit(["diff", "--name-only", "-z", f"{base}...HEAD"]).split("\0") if f.strip()]
     diff = run_git_or_exit(["diff", "-U0", f"{base}...HEAD"])
     added = added_lines(diff)
     numstat = run_git_or_exit(["diff", "--numstat", f"{base}...HEAD"]).splitlines()
@@ -205,7 +207,10 @@ def main() -> None:
     ]
 
     plan = [p.strip() for p in args.plan.split(",") if p.strip()] if args.plan else None
-    findings = check_files(files, plan, args.allow_generated)
+    findings = [Finding(level, message) for level, message in worktree_findings()]
+    if not files:
+        findings.append(Finding("FAIL", f"no committed change against {base}; there is nothing to check"))
+    findings += check_files(files, plan, args.allow_generated)
     findings += check_added(added, scope_globs(facts.get("ascii_only")), args.allow_generated)
     findings += check_commits(messages, truthy(facts.get("dco")), disclosure_trailer_regex(facts))
     findings += check_signatures(statuses, truthy(facts.get("signed_commits")))

@@ -1,5 +1,7 @@
 """Gaps found by the 2026-10-04 audit of v1.0.0. Each test reproduces a case a gate let through."""
 
+import json
+
 from conftest import git, run
 from diff_check import added_lines
 from findings_check import changed_ranges
@@ -30,3 +32,62 @@ def test_non_ascii_path_is_checked_under_its_real_name(setup):
     result = run("diff_check.py", repo, home, "acme/widgets", "--base", "main", "--plan", "pkg/a.py,docs/*")
     assert "docs/中文.md:1: non-ASCII" in result.stdout, result.stdout + result.stderr
     assert "not in the plan" not in result.stdout
+
+
+class TestReviewGatesSeeTheRealChange:
+    def test_uncommitted_fix_fails_both_gates(self, setup):
+        """Both gates read base...HEAD; a fix left uncommitted gave a clean 0-file PASS."""
+        repo, home = setup
+        (repo / "pkg" / "a.py").write_text("def run(items):\n    return items[-1]\n", encoding="utf-8")
+        diff = run("diff_check.py", repo, home, "acme/widgets", "--base", "main")
+        assert diff.returncode == 1 and "uncommitted changes" in diff.stdout, diff.stdout + diff.stderr
+        (repo / "review.json").write_text('{"coverage": [], "tests": [], "findings": []}', encoding="utf-8")
+        review = run("findings_check.py", repo, home, "review.json", "--base", "main")
+        assert review.returncode == 1 and "uncommitted changes" in review.stdout, review.stdout + review.stderr
+
+    def test_untracked_file_is_a_warning(self, setup):
+        repo, home = setup
+        (repo / "pkg" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+        result = run("diff_check.py", repo, home, "acme/widgets", "--base", "main")
+        assert "WARN: 1 untracked file" in result.stdout and "pkg/helper.py" in result.stdout, result.stdout
+
+    def test_empty_change_is_not_a_pass(self, setup):
+        repo, home = setup
+        git(repo, "checkout", "-q", "main")
+        git(repo, "checkout", "-q", "-b", "nothing")
+        result = run("diff_check.py", repo, home, "acme/widgets", "--base", "main")
+        assert result.returncode == 1 and "no committed change" in result.stdout, result.stdout
+
+    def test_deleted_file_needs_review(self, setup):
+        """`--diff-filter=d` left deleted files out of coverage: deleting behavior reviewed nothing."""
+        repo, home = setup
+        git(repo, "rm", "-q", "pkg/a.py")
+        git(repo, "commit", "-q", "-m", "refactor: drop run()")
+        report = {
+            "coverage": [{"path": "docs/note.md", "status": "skipped", "reason": "prose"}],
+            "tests": [
+                {"name": "test_x", "fails_without_fix": True, "without_fix_log": "w.txt", "with_fix_log": "f.txt"}
+            ],
+            "findings": [],
+        }
+        (repo / "w.txt").write_text("FAILED t.py::test_x\n1 failed\n", encoding="utf-8")
+        (repo / "f.txt").write_text("t.py::test_x PASSED\n1 passed\n", encoding="utf-8")
+        (repo / "review.json").write_text(json.dumps(report), encoding="utf-8")
+        missing = run("findings_check.py", repo, home, "review.json", "--base", "main")
+        assert missing.returncode == 1 and "pkg/a.py: not in coverage" in missing.stdout, missing.stdout
+        report["coverage"].append({"path": "pkg/a.py", "status": "reviewed"})
+        report["findings"] = [
+            {
+                "path": "pkg/a.py",
+                "start_line": 1,
+                "end_line": 2,
+                "severity": "low",
+                "category": "maintainability",
+                "evidence": "callers of run() are gone too",
+                "resolution": "fixed",
+            }
+        ]
+        (repo / "review.json").write_text(json.dumps(report), encoding="utf-8")
+        ok = run("findings_check.py", repo, home, "review.json", "--base", "main")
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        assert "coverage 1/2 files reviewed" in ok.stdout

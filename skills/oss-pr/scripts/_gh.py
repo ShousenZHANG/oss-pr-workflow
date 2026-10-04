@@ -320,6 +320,50 @@ def default_base() -> str:
     return "upstream/main"
 
 
+def uncommitted() -> tuple[list[str], list[str]]:
+    """(tracked files with staged or unstaged changes, untracked files) in the current worktree."""
+    entries = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).split("\0")
+    tracked: list[str] = []
+    untracked: list[str] = []
+    skip_next = False
+    for entry in entries:
+        if skip_next:  # the original path of a rename or copy
+            skip_next = False
+            continue
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:]
+        if code == "??":
+            untracked.append(path)
+        elif code != "!!":
+            tracked.append(path)
+            skip_next = code[0] in "RC"
+    return tracked, untracked
+
+
+def worktree_findings() -> list[tuple[str, str]]:
+    """(level, message) for work the base...HEAD checks cannot see: uncommitted edits fail, untracked files warn."""
+    tracked, untracked = uncommitted()
+    out = []
+    if tracked:
+        out.append(
+            (
+                "FAIL",
+                f"uncommitted changes in {len(tracked)} tracked file(s) ({', '.join(tracked[:5])}); the checks read "
+                "committed history only, so commit or stash them and run again",
+            )
+        )
+    if untracked:
+        out.append(
+            (
+                "WARN",
+                f"{len(untracked)} untracked file(s) not in the checked change: {', '.join(untracked[:8])}; "
+                "commit any that belong to it",
+            )
+        )
+    return out
+
+
 def run_git_or_exit(args: list[str]) -> str:
     """git() for command-line entry points: print a clean message instead of a traceback."""
     try:
