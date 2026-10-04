@@ -150,6 +150,10 @@ def main() -> None:
     )
     if closed_by_link:
         print(f"closed-unmerged by link keyword: {dict(closed_by_link)}")
+    print(
+        "note: every PR that mentioned the issue is counted, including unrelated mentions (triage, docs). "
+        "Read the titles; with few PRs one unrelated mention can swing the rate."
+    )
     if warning:
         print(warning)
     if counts["UNKNOWN_KIND"]:

@@ -137,7 +137,14 @@ def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
             out.append(Finding("FAIL", f"test {name}: with_fix_log does not show a clean pass"))
             continue
         if name.split("::")[-1].split("[")[0] not in without_log:
-            out.append(Finding("WARN", f"test {name}: its name does not appear in without_fix_log; was it this test?"))
+            out.append(
+                Finding(
+                    "FAIL",
+                    f"test {name}: its name does not appear in without_fix_log, so the log does not show this test "
+                    "failing (a collection or import error is not a failing test)",
+                )
+            )
+            continue
         proven = True
     if not proven:
         out.append(Finding("FAIL", "no test is proven to fail without the fix and pass with it"))

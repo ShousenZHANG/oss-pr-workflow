@@ -59,7 +59,10 @@ PR_TEXT_TERM = re.compile(
 CONTRIB_DOC_TOPIC = re.compile(
     r"(?i)(pull.?request|\bai\b|ai[_-]|gen.?ai|open.?pull|limit|commit|review|issue|guide|readme|index)"
 )
-CHECK_COMMAND = re.compile(r"(?i)\b(?:lint|test|check|typecheck|type-check|format|fmt|precheck|vet|mypy|ruff|prettier)")
+CHECK_COMMAND = re.compile(
+    r"(?i)(?:\b|py)(?:lint|test|check|typecheck|type-check|format|fmt|precheck|vet|mypy|ruff|prettier|clint)"
+    r"|\bpre-commit run\b|\bprek run\b"
+)
 RELEASE_WORKFLOW = re.compile(r"(?im)^\s*(?:release|tags?):|^\s*-\s*['\"]?v\*|workflow_dispatch:\s*$")
 TEMPLATE_PATH = re.compile(r"(?i)^(\.github/|docs/)?pull_request_template(\.md|/[^/]+\.md)$")
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
@@ -107,11 +110,13 @@ BOT_RULE = re.compile(
     r"(?i)(days-before-(?:pr-)?(?:stale|close)|stale-pr-(?:message|label)|close-pr-message|\bslop\b|"
     r"auto-?clos\w*|state:\s*['\"]closed['\"]|closeIssue|pulls\.update|has-closing-pr|"
     r"\bready\b.*label|label.*\bready\b|first-?time contributor|exempt-pr|"
-    r"without (?:a|an) (?:linked|related) issue|missing (?:template|sections?)|duplicate)"
+    r"without (?:a|an) (?:linked|related) issue|missing (?:template|sections?)|duplicate|"
+    r"protected[_ ]paths?|maintainer[- ]only|loc[_ ]threshold|stale[_ ]days)"
 )
 NOISE_COMMAND = re.compile(
     r"^(?:gh |curl |echo |printf |cat <<|#|if |then|else|fi\b|for |done|do\b|\{|\}|export |set |cd |"
-    r"exit|sleep |mkdir |rm |mv |cp |chmod |sudo |apt|brew |git config|git fetch|git checkout)"
+    r"exit|sleep |mkdir |rm |mv |cp |chmod |sudo |apt|brew |git config|git fetch|git checkout|"
+    r"\w+=|\w+\(\)\s*\{|\*\*|title=|-\s|>)"
 )
 
 STRICTNESS = {level: rank for rank, level in enumerate(AI_POLICY_LEVELS)}
@@ -206,6 +211,11 @@ def classify_ai_policy(docs: dict[str, str]) -> tuple[str, list[Evidence]]:
             level = classify_line(window, agent_doc)
             if level:
                 direct = classify_line(line, agent_doc) == level
+                ends_sentence = bool(re.search(r"[.!?:)]\s*$", line)) or bool(
+                    re.match(r"\s*(?:[-*]|\d+\.)\s", lines[i + 1] if i + 1 < len(lines) else "")
+                )
+                if not direct and ends_sentence:
+                    continue  # the AI wording belongs to the next sentence, not to this line's rule
                 evidence.append(Evidence(level, source, i + 1, " ".join(line.split())[:220], direct))
     if not evidence:
         return "none", []
@@ -238,14 +248,25 @@ def first_match(pattern: str, docs: dict[str, str], flags: int = re.IGNORECASE) 
     return None
 
 
-def all_matches(regex: re.Pattern[str], docs: dict[str, str], limit: int) -> list[tuple[str, int, str]]:
-    hits = []
+def all_matches(
+    regex: re.Pattern[str], docs: dict[str, str], limit: int, per_file: int = 6
+) -> list[tuple[str, int, str]]:
+    """Matching lines, at most `per_file` per document so one long workflow cannot crowd out the rest.
+    A final ("...", 0, note) entry says how many were left out."""
+    hits: list[tuple[str, int, str]] = []
+    skipped = 0
     for source, text in docs.items():
+        in_file = 0
         for i, line in enumerate(text.splitlines()):
-            if regex.search(line):
-                hits.append((source, i + 1, " ".join(line.split())[:180]))
-                if len(hits) >= limit:
-                    return hits
+            if not regex.search(line):
+                continue
+            if in_file >= per_file or len(hits) >= limit:
+                skipped += 1
+                continue
+            hits.append((source, i + 1, " ".join(line.split())[:180]))
+            in_file += 1
+    if skipped:
+        hits.append(("...", 0, f"{skipped} more matching lines not shown; search the workflow files"))
     return hits
 
 
@@ -290,14 +311,17 @@ def workflow_commands(text: str) -> list[str]:
 
 
 def ranked_commands(automation: dict[str, str]) -> list[str]:
-    """CI commands worth reproducing locally: checks (lint, test, typecheck, ...) first, release workflows dropped."""
-    commands: list[str] = []
+    """CI commands worth reproducing locally, best first: checks in workflows that run on pull requests,
+    then other checks, then the rest. Release-only workflows are dropped."""
+    ranked: dict[str, int] = {}
     for path, text in automation.items():
         if not path.endswith((".yml", ".yaml")) or RELEASE_WORKFLOW.search(text) and not CHECK_COMMAND.search(path):
             continue
-        commands.extend(workflow_commands(text))
-    unique = list(dict.fromkeys(commands))
-    return sorted(unique, key=lambda c: 0 if CHECK_COMMAND.search(c) else 1)
+        on_pr = bool(re.search(r"(?m)^\s*(?:on:.*\bpull_request|pull_request(?:_target)?:)", text))
+        for command in workflow_commands(text):
+            rank = (0 if on_pr else 1) if CHECK_COMMAND.search(command) else 2
+            ranked[command] = min(rank, ranked.get(command, rank))
+    return sorted(ranked, key=lambda c: ranked[c])
 
 
 def title_style(titles: list[str], docs: dict[str, str]) -> str:
@@ -409,6 +433,8 @@ def resolve_symlink_docs(repo: str, branch: str, docs: dict[str, str], tree: set
     for path, text in docs.items():
         target = text.strip()
         if "\n" not in target and target in tree and target != path:
+            if target in docs:
+                continue  # the target is read on its own; reading it twice duplicates every evidence line
             real = raw_file(repo, target, branch)
             resolved[f"{path} -> {target}"] = real or text
         else:
@@ -439,6 +465,10 @@ def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str],
     docs = resolve_symlink_docs(repo, branch, fetch_many(repo, branch, list(dict.fromkeys(doc_paths))[:40]), set(tree))
     template_texts = fetch_many(repo, branch, templates)
     automation = fetch_many(repo, branch, workflow_paths + script_paths)
+    unread = [p for p in workflow_paths + script_paths if p not in automation]
+    if unread:
+        print(f"WARNING: could not fetch {len(unread)} workflow files: {', '.join(unread[:8])}", file=sys.stderr)
+        automation = {**automation, "(unread)": "\n".join(unread)}
     linked = fetch_linked_policies(repo, branch, {**docs, **template_texts}, set(docs) | set(template_texts), set(tree))
     return {**docs, **linked}, template_texts, automation
 
@@ -517,13 +547,21 @@ def scoped_agent_files(tree: list[str]) -> list[str]:
 
 
 def stale_days(automation: dict[str, str]) -> str:
-    found = []
+    """PR stale timers. PR-specific keys win over generic ones; -1 means disabled; scripts' STALE_DAYS count."""
+    found: dict[str, str] = {}
     for key in ("days-before-pr-stale", "days-before-pr-close", "days-before-stale", "days-before-close"):
-        hit = first_match(rf"{key}:\s*\d+", automation)
+        hit = first_match(rf"{key}:\s*-?\d+", automation)
         if hit:
-            number = re.search(r"\d+", hit[2].split(key, 1)[1])
-            found.append(f"{key} {number.group(0) if number else '?'}")
-    return ", ".join(found) or "none found"
+            number = re.search(r"-?\d+", hit[2].split(key, 1)[1])
+            value = number.group(0) if number else "?"
+            found[key] = "disabled" if value.startswith("-") else value
+    pr_keys = {k: v for k, v in found.items() if "-pr-" in k}
+    chosen = pr_keys if pr_keys else found
+    parts = [f"{key} {value}" for key, value in chosen.items()]
+    script = first_match(r"\bSTALE_DAYS\s*=\s*\d+", automation)
+    if script:
+        parts.append(f"{script[0]}: {script[2]}")
+    return ", ".join(parts) or "none found"
 
 
 def render(repo: str, facts: dict[str, str], sections: dict[str, list[str]]) -> str:
@@ -653,7 +691,7 @@ def main() -> None:
 
     commands = ranked_commands(automation)
     scoped = scoped_agent_files(tree)
-    bot_rules = all_matches(BOT_RULE, automation, 30)
+    bot_rules = all_matches(BOT_RULE, automation, 60)
     sections = {
         "AI policy evidence": [f'- [{e.level}] {e.source}:{e.line} "{e.text}"' for e in evidence[:15]],
         "Other evidence": [
@@ -699,7 +737,10 @@ def main() -> None:
             "|-------|------------|----------|",
         ],
         "Documents read": [f"- {p}" for p in dict.fromkeys([*docs, *templates])]
-        + [f"- {len(automation)} workflow and workflow-script files"],
+        + [f"- {len(automation) - ('(unread)' in automation)} workflow and workflow-script files"]
+        + (
+            [f"- could not fetch: {', '.join(automation['(unread)'].splitlines())}"] if "(unread)" in automation else []
+        ),
     }
     text = render(args.repo, facts, sections)
 

@@ -1,6 +1,7 @@
 """Defects found by the acceptance dry runs on grafana, mlflow and cilium, each pinned by a test."""
 
 import pytest
+from _config import glob_match
 from _gh import base_changed_ranges
 from base_rate import closing_comment
 from contention_map import check, parse_check
@@ -378,3 +379,49 @@ class TestRoundTwoFindings:
 
         assert WORKFLOW_ARTIFACT.search("review.json") and WORKFLOW_ARTIFACT.search("runs/with_fix.txt")
         assert not WORKFLOW_ARTIFACT.search("src/review_json.py")
+
+
+class TestRoundTwoMlflow:
+    def test_removable_checkboxes(self):
+        template = "<!-- Remove unused checkboxes -->\n## Type\n- [ ] Bug fix\n- [ ] Feature\n"
+        assert check_template("## Type\n- [x] Bug fix\n", template) == []
+        invented = check_template("## Type\n- [x] Refactor\n", template)
+        assert any("invented" in f.message for f in invented)
+
+    def test_check_commands_include_pytest_and_pre_commit(self):
+        from profile_draft import CHECK_COMMAND, NOISE_COMMAND
+
+        assert CHECK_COMMAND.search("pytest dev/clint dev/pypi")
+        assert CHECK_COMMAND.search("pre-commit run --all-files")
+        for noise in ("LOGIN=foo", "check_user() {", "**If you are cherry-picking**", 'title="Weekly report"'):
+            assert NOISE_COMMAND.match(noise), noise
+
+    def test_bot_rules_are_capped_per_file(self):
+        from profile_draft import BOT_RULE, all_matches
+
+        docs = {"a.yml": "\n".join(["auto-close"] * 20), "b.js": "const PROTECTED_PATHS = ['AGENTS.md']"}
+        hits = all_matches(BOT_RULE, docs, 60)
+        assert sum(1 for h in hits if h[0] == "a.yml") == 6
+        assert any(h[0] == "b.js" for h in hits)
+        assert hits[-1][0] == "..."
+
+    def test_stale_timers_prefer_pr_keys_and_read_disabled(self):
+        from profile_draft import stale_days
+
+        text = {"stale.yml": "days-before-stale: 365\ndays-before-pr-stale: -1\n", "s.js": "const STALE_DAYS = 30;"}
+        result = stale_days(text)
+        assert "days-before-pr-stale disabled" in result and "365" not in result and "STALE_DAYS = 30" in result
+
+    def test_continuation_line_does_not_make_evidence(self):
+        from profile_draft import classify_ai_policy
+
+        docs = {
+            "CLAUDE.md": "- DCO sign-off: All commits MUST use the -s flag.\n- Disclose Claude Code use in a trailer.\n"
+        }
+        _level, evidence = classify_ai_policy(docs)
+        assert all("DCO" not in e.text for e in evidence)
+
+    def test_glob_alternatives_with_wildcards(self):
+        assert glob_match("{src/*.py,**/test_*.py}", "a/b/test_x.py")
+        assert glob_match("{src/*.py,**/test_*.py}", "src/m.py")
+        assert not glob_match("{src/*.py,**/test_*.py}", "lib/m.py")

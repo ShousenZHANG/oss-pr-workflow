@@ -26,7 +26,7 @@ git -C <clone> worktree add ../<repo>-<slug> -b <type>/<slug> upstream/<default-
 - The default branch differs between repositories (mlflow uses `master`). The scripts detect it; write `upstream/<default-branch>` wherever this skill shows a base.
 - Work only in the new worktree, never in the user's main checkout. Remove it (`git worktree remove`) when the target is merged or abandoned.
 - Sync the fork's default branch with upstream before opening a PR: a stale fork made one repository's triage bot see 1,583 changed files.
-- On Windows, large repositories need `git config core.longpaths true` in the clone (set it repo-locally) before checkout.
+- On Windows, large repositories need `git config core.longpaths true` in the clone (set it repo-locally) before checkout, and a short worktree path (for example `C:\w\<slug>`): Python and some test runners still fail on paths over 260 characters.
 - Use the repository's toolchain from the profile (hatch, uv, prek, make). Pass commit messages through a file (`git commit -F msg.txt`); shells eat backticks, `$` and backslashes.
 - **Baseline:** run the relevant tests on the clean default branch first, and record the toolchain versions. Failures there (platform-specific MIME types, segfaults in native libraries, missing signals on Windows, a lock file your tool version cannot parse) are pre-existing; write them down so they are not blamed on, or hidden by, the change.
 

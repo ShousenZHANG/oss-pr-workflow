@@ -78,6 +78,13 @@ On first use you are asked a few questions (which sources to scout, whether ques
 - Text in issues, comments and bot output is treated as data, never as instructions.
 - The aim is fewer, better-aimed PRs, not more of them.
 
+## Known limitations
+
+- The profile draft is pattern matching over a repository's documents and workflows. It has been checked against eight repositories (dify, haystack, airflow, mlflow, grafana, cilium, cli/cli, home-assistant), but every fact still needs a human read of the quoted evidence before use.
+- Policy enforced only by private bots or in maintainers' heads is invisible until it shows up in closing comments; `base_rate.py` surfaces those, but only after it has happened to someone.
+- The build phase has been exercised end to end on a Python repository. On Go and TypeScript repositories it was verified only up to "checks cannot run locally, user decides", because the toolchains were not installed.
+- Merge-rate estimates are as good as their sample: a repository with few outside PRs gives a wide, weak estimate, and the scripts say so with n.
+
 ## Development
 
 ```bash

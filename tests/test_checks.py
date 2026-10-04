@@ -168,9 +168,10 @@ class TestFindingsCheck:
         logs = {"without.txt": self.LOGS["without.txt"], "with.txt": "test_empty PASSED\n1 failed, 3 passed"}
         assert "FAIL" in self.levels(self.report(), logs)
 
-    def test_log_without_the_test_name_is_a_warning(self):
-        logs = {"without.txt": "FAILED something_else\n1 failed", "with.txt": self.LOGS["with.txt"]}
-        assert self.levels(self.report(), logs) == ["WARN"]
+    def test_log_without_the_test_name_fails(self):
+        """A collection or import error mentions no test; it does not prove this test fails (mlflow round 2)."""
+        logs = {"without.txt": "ImportError while loading conftest\n1 error", "with.txt": self.LOGS["with.txt"]}
+        assert "FAIL" in self.levels(self.report(), logs)
 
     def test_missing_coverage(self):
         assert "FAIL" in self.levels(self.report(coverage=[{"path": "pkg/a.py", "status": "reviewed"}]))

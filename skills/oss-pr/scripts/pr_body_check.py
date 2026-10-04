@@ -83,8 +83,12 @@ def check_template(body: str, template: str) -> list[Finding]:
             findings.append(Finding("FAIL", f"template heading missing: {heading!r}"))
     wanted = [(normalize(item), item) for item in checklist(template)]
     have = [(normalize(item), item) for item in checklist(body)]
+    # Some templates tell the author to delete the boxes that do not apply; then only invented items are wrong.
+    removable = bool(
+        re.search(r"(?i)\b(?:remove|delete)\b[^.\n]{0,30}\b(?:unused|irrelevant|inapplicable)\b", template)
+    )
     for norm, raw in wanted:
-        if not any(same_item(norm, h) for h, _ in have):
+        if not removable and not any(same_item(norm, h) for h, _ in have):
             findings.append(Finding("FAIL", f"template checklist item missing or reworded: {raw[:90]!r}"))
     if wanted:
         for norm, raw in have:

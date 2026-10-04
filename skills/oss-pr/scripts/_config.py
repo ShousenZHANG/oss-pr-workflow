@@ -116,7 +116,12 @@ def parse_path_rules(text: str) -> list[tuple[str, str]]:
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Translate a gitignore-style glob: `**` crosses directories, `*` and `?` do not, `{a,b}` alternates."""
+    """Translate a gitignore-style glob: `**` crosses directories, `*` and `?` do not, `{a,b}` alternates
+    (alternatives may contain wildcards themselves: `{src/*.py,**/test_*.py}`)."""
+    return re.compile("^" + _glob_body(pattern) + "$")
+
+
+def _glob_body(pattern: str) -> str:
     out, i = [], 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
@@ -137,12 +142,12 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
                 out.append(re.escape(pattern[i]))
                 i += 1
             else:
-                out.append("(?:" + "|".join(re.escape(alt) for alt in pattern[i + 1 : end].split(",")) + ")")
+                out.append("(?:" + "|".join(_glob_body(alt) for alt in pattern[i + 1 : end].split(",")) + ")")
                 i = end + 1
         else:
             out.append(re.escape(pattern[i]))
             i += 1
-    return re.compile("^" + "".join(out) + "$")
+    return "".join(out)
 
 
 def glob_match(pattern: str, path: str) -> bool:
