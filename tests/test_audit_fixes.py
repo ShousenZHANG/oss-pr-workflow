@@ -5,10 +5,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pacing
 import pytest
-from _config import load_profile, parse_facts, profile_status
+from _config import load_profile, parse_facts, profile_status, scope_globs, split_globs
 from conftest import git, run
-from diff_check import added_lines
+from diff_check import added_lines, check_commits
 from findings_check import changed_ranges, check_tests
+from ledger import Entry, parse, render
 from pacing import Limits, MyPR, decide
 from profile_draft import classify_ai_policy, ranked_commands, workflow_commands
 
@@ -229,6 +230,41 @@ class TestAiPolicyKeepsBans:
     def test_agents_file_forbidding_prs(self):
         """AGENTS.md said "Do not open pull requests." with no AI word and read as no policy."""
         assert classify_ai_policy({"AGENTS.md": "Do not open pull requests.\n"})[0] == "human-in-loop"
+
+
+class TestSmallParsers:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("notes/**", ["notes/**"]),
+            ("normal/**, docs/**", ["normal/**", "docs/**"]),
+            ("**/*.{ts,tsx}", ["**/*.{ts,tsx}"]),
+            ("yes: **/*.{md,rst}, `notes/**`", ["**/*.{md,rst}", "notes/**"]),
+            ("no", []),
+            ("none found", []),
+            ("False", []),
+        ],
+    )
+    def test_scope_globs(self, value, expected):
+        """`notes/**` started with "no" and switched the ASCII check off; brace lists were cut at the comma."""
+        assert scope_globs(value) == expected
+
+    def test_plan_with_brace_glob(self):
+        assert split_globs("pkg/a.py,web/**/*.{ts,tsx}") == ["pkg/a.py", "web/**/*.{ts,tsx}"]
+
+    def test_dco_needs_a_real_trailer(self):
+        assert check_commits(["fix: mention Signed-off-by: in the docs"], dco=True)
+        assert check_commits(["fix: a\n\nSigned-off-by: someone\n"], dco=True)
+        assert check_commits(["fix: a\n\nSigned-off-by: A Person <a@example.com>\n"], dco=True) == []
+
+    @pytest.mark.parametrize("field", ["basis", "notes"])
+    def test_ledger_keeps_windows_newlines_in_one_row(self, field):
+        """A CRLF in a middle field split the row and the whole entry vanished on the next read."""
+        values = dict(id=1, date="2026-10-04", repo="a/b", target="#1", stage="recon", estimate="50%")
+        values |= dict(basis="b", pr="", outcome="", notes="n")
+        values[field] = "line one\r\nline two"
+        rows = parse(render([Entry(**values)]))
+        assert len(rows) == 1 and getattr(rows[0], field) == "line one line two"
 
 
 class TestCiCommands:

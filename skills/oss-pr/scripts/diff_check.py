@@ -28,7 +28,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from _config import glob_match, load_profile, scope_globs, truthy
+from _config import glob_match, load_profile, scope_globs, split_globs, truthy
 from _gh import default_base, run_git_or_exit, split_diff, use_utf8_stdout, worktree_findings
 
 LOCK_FILES = (
@@ -52,6 +52,8 @@ SECRET_PATTERNS = {
     "OpenAI/Anthropic-style key": re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
 }
+# A real sign-off trailer with a name and an address, not the words anywhere in the message.
+DCO_TRAILER = re.compile(r"(?m)^Signed-off-by: \S.* <[^<>\s]+@[^<>\s]+>\s*$")
 AI_TRAILER = re.compile(
     r"(?im)^(?:co-authored-by|generated-by|assisted-by):.*\b(?:claude|copilot|gpt|codex|cursor|ai)\b"
 )
@@ -120,7 +122,7 @@ def check_commits(messages: list[str], dco: bool, trailer_regex: str | None = No
     findings = []
     for message in messages:
         subject = message.strip().splitlines()[0] if message.strip() else "(empty)"
-        if dco and "Signed-off-by:" not in message:
+        if dco and not DCO_TRAILER.search(message):
             findings.append(Finding("FAIL", f"commit '{subject[:60]}' has no Signed-off-by (repo requires DCO)"))
         if AI_TRAILER.search(message) and not trailer_regex:
             findings.append(
@@ -206,7 +208,7 @@ def main() -> None:
         if "\x00" in row
     ]
 
-    plan = [p.strip() for p in args.plan.split(",") if p.strip()] if args.plan else None
+    plan = split_globs(args.plan) if args.plan else None
     findings = [Finding(level, message) for level, message in worktree_findings()]
     if not files:
         findings.append(Finding("FAIL", f"no committed change against {base}; there is nothing to check"))

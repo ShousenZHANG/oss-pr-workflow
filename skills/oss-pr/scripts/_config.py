@@ -187,12 +187,30 @@ def truthy(value: str | None) -> bool:
     return bool(words) and words[0].rstrip(",:;") in {"yes", "true", "1", "required"}
 
 
+def split_globs(text: str) -> list[str]:
+    """Comma-separated globs; a comma inside `{a,b}` belongs to the glob."""
+    parts, depth, current = [], 0, ""
+    for ch in text:
+        depth += {"{": 1, "}": -1}.get(ch, 0)
+        if ch == "," and depth <= 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += ch
+    parts.append(current)
+    return [p.strip().strip("`") for p in parts if p.strip().strip("`")]
+
+
 def scope_globs(value: str | None) -> list[str]:
-    """A fact that applies to some paths: `no` -> [], `yes` -> everything, else comma-separated globs."""
+    """A fact that applies to some paths: `no` -> [], `yes` -> everything, else comma-separated globs.
+
+    Only the whole first word turns the fact off: `notes/**` is a path, not "no".
+    """
     text = (value or "").strip()
-    if not text or text.lower().startswith(("no", "none", "false")):
+    first = re.split(r"[\s,:;(]", text.lower(), maxsplit=1)[0] if text else ""
+    if not text or first in {"no", "none", "false", "n/a"}:
         return []
     if text.lower() in {"yes", "true", "required"}:
         return ["**"]
     text = re.sub(r"(?i)^yes\s*[:(]?\s*", "", text).rstrip(")")
-    return [g.strip().strip("`") for g in text.split(",") if g.strip()]
+    return split_globs(text)

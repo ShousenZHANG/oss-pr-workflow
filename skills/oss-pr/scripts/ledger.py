@@ -15,6 +15,8 @@ closed-merits (maintainers did not want the change), withdrawn (you closed it).
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import date
@@ -50,7 +52,8 @@ def ledger_path() -> Path:
 
 
 def cell(value: str) -> str:
-    return str(value).replace("|", "/").replace("\n", " ").strip()
+    """One table cell: no pipes, and no line breaks of any kind (a lone CR also ends a line when read back)."""
+    return re.sub(r"\s*[\r\n]+\s*", " ", str(value).replace("|", "/")).strip()
 
 
 def render(entries: list[Entry]) -> str:
@@ -82,7 +85,10 @@ def load() -> list[Entry]:
 def save(entries: list[Entry]) -> None:
     path = ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render(entries), encoding="utf-8")
+    # Write a sibling file, then swap it in: a crash mid-write leaves the old ledger intact.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(render(entries), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def calibration(entries: list[Entry]) -> list[str]:
