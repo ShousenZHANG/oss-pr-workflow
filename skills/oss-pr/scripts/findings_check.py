@@ -75,7 +75,10 @@ FAILED_COUNT = re.compile(
     r"(?im)\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bfail(?:ed|ures?)?:? [1-9]\d*\b|"
     r"^\s*(?:FAILED\b|FAIL\b|--- FAIL|not ok\b|Traceback \(most recent call last\)|panic:|AssertionError|✕|×)"
 )
-PASS_MARKER = re.compile(r"(?i)\b(?:passed|pass|ok|success(?:ful)?)\b")
+# One test's own result line, in the formats of pytest -v, unittest -v, go test -v, cargo, jest/vitest, surefire.
+FAIL_LINE = re.compile(r"(?i)\bfail(?:ed|ures?|s)?\b|\berror\b|✕|×|✗|\bnot ok\b|<<< FAILURE")
+PASS_LINE = re.compile(r"(?i)\bpass(?:ed|es)?\b|\bok\b|✓|✔|√")
+SKIP_LINE = re.compile(r"(?i)\bskip(?:ped)?\b|\bx(?:fail|pass)\w*|\bpending\b|\btodo\b")
 
 
 @dataclass(frozen=True)
@@ -107,15 +110,24 @@ def read_file(path: str) -> str | None:
         return None
 
 
+def result_lines(log: str, name: str) -> list[str]:
+    """Lines of a run log that name this test as a whole word (`test_x`, not `test_x_slow`)."""
+    word = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)")
+    return [line for line in log.splitlines() if word.search(line)]
+
+
 def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
     """At least one test must be shown, by saved output, to fail without the fix and pass with it.
 
-    A boolean the reviewer sets is not evidence; the two run logs are.
+    A boolean the reviewer sets is not evidence; the two run logs are, and both must
+    name the same test on its own result line: another test failing before, or
+    another test passing (or this one skipped) after, proves nothing about this one.
     """
     out: list[Finding] = []
     proven = False
     for test in tests:
         name = test.get("name", "?")
+        short = name.split("::")[-1].split("[")[0]
         if test.get("fails_without_fix") is not True:
             continue
         without_log = read_text(test.get("without_fix_log", "")) if test.get("without_fix_log") else None
@@ -136,15 +148,29 @@ def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
                 Finding("FAIL", f"test {name}: without_fix_log shows no failure (a zero failure count is a pass)")
             )
             continue
-        if FAILED_COUNT.search(with_log) or not PASS_MARKER.search(with_log):
+        if FAILED_COUNT.search(with_log):
             out.append(Finding("FAIL", f"test {name}: with_fix_log does not show a clean pass"))
             continue
-        if name.split("::")[-1].split("[")[0] not in without_log:
+        if not any(FAIL_LINE.search(line) for line in result_lines(without_log, short)):
             out.append(
                 Finding(
                     "FAIL",
-                    f"test {name}: its name does not appear in without_fix_log, so the log does not show this test "
-                    "failing (a collection or import error is not a failing test)",
+                    f"test {name}: without_fix_log does not show {short} failing; its name must be on a failure "
+                    "line (a collection error or another test's failure is not this test failing)",
+                )
+            )
+            continue
+        passing = [
+            line
+            for line in result_lines(with_log, short)
+            if PASS_LINE.search(line) and not FAIL_LINE.search(line) and not SKIP_LINE.search(line)
+        ]
+        if not passing:
+            out.append(
+                Finding(
+                    "FAIL",
+                    f"test {name}: with_fix_log does not show {short} passing; run it verbose (pytest -v, "
+                    "go test -v, jest --verbose) so the result line names the test",
                 )
             )
             continue

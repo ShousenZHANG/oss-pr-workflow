@@ -4,7 +4,7 @@ import json
 
 from conftest import git, run
 from diff_check import added_lines
-from findings_check import changed_ranges
+from findings_check import changed_ranges, check_tests
 
 
 class TestDiffParsing:
@@ -91,3 +91,40 @@ class TestReviewGatesSeeTheRealChange:
         ok = run("findings_check.py", repo, home, "review.json", "--base", "main")
         assert ok.returncode == 0, ok.stdout + ok.stderr
         assert "coverage 1/2 files reviewed" in ok.stdout
+
+
+class TestEvidenceIsTheSameTest:
+    def check(self, without: str, with_: str) -> list[str]:
+        logs = {"without.txt": without, "with.txt": with_}
+        test = {"name": "tests/t.py::test_x", "fails_without_fix": True}
+        test |= {"without_fix_log": "without.txt", "with_fix_log": "with.txt"}
+        return [f.message for f in check_tests([test], read_text=logs.get)]
+
+    def test_other_test_passing_is_not_proof(self):
+        messages = self.check("tests/t.py::test_x FAILED\n1 failed", "tests/t.py::test_y PASSED\n1 passed")
+        assert any("does not show test_x passing" in m for m in messages), messages
+
+    def test_skipped_run_is_not_a_pass(self):
+        messages = self.check("tests/t.py::test_x FAILED\n1 failed", "tests/t.py::test_x SKIPPED\n0 passed, 1 skipped")
+        assert any("does not show test_x passing" in m for m in messages), messages
+
+    def test_another_test_failing_is_not_this_test_failing(self):
+        without = "tests/t.py::test_x PASSED\ntests/t.py::test_z FAILED\n1 failed, 1 passed"
+        messages = self.check(without, "tests/t.py::test_x PASSED\n1 passed")
+        assert any("does not show test_x failing" in m for m in messages), messages
+
+    def test_similar_name_does_not_count(self):
+        messages = self.check("tests/t.py::test_x_slow FAILED\n1 failed", "tests/t.py::test_x PASSED\n1 passed")
+        assert any("does not show test_x failing" in m for m in messages), messages
+
+    def test_real_red_green_passes_across_runners(self):
+        assert self.check("FAILED tests/t.py::test_x - AssertionError\n1 failed", "tests/t.py::test_x PASSED") == []
+        go = {"name": "TestX", "fails_without_fix": True, "without_fix_log": "a", "with_fix_log": "b"}
+        logs = {"a": "--- FAIL: TestX (0.00s)\nFAIL", "b": "--- PASS: TestX (0.00s)\nok"}
+        assert check_tests([go], read_text=logs.get) == []
+        jest = {"name": "renders empty list", "fails_without_fix": True, "without_fix_log": "a", "with_fix_log": "b"}
+        logs = {
+            "a": "  ✕ renders empty list (4 ms)\nTests: 1 failed",
+            "b": "  ✓ renders empty list (3 ms)\nTests: 1 passed",
+        }
+        assert check_tests([jest], read_text=logs.get) == []

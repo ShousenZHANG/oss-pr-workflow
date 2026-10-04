@@ -52,7 +52,8 @@ A required tool may be missing (Go, yarn, a CI-only container) or the platform m
 1. Write the test, run it, see it **fail** for the right reason on the unfixed code.
 2. Apply the fix, see it pass.
 3. Revert the fix (or delete the decorator / guard under test) and confirm the test fails again.
-4. Save both runs' output to files (`runs/without_fix.txt`, `runs/with_fix.txt`) and record them in `review.json`: `"fails_without_fix": true`, the `command`, `without_fix_log`, `with_fix_log`. `findings_check.py` reads the logs; a bare `true` is not accepted.
+4. Save both runs' output to files (`runs/without_fix.txt`, `runs/with_fix.txt`) and record them in `review.json`: `"fails_without_fix": true`, the `command`, `without_fix_log`, `with_fix_log`. `findings_check.py` reads the logs; a bare `true` is not accepted. Run the test verbose (`pytest -v`, `go test -v`, `jest --verbose`): both logs must show this test's own result line, failing in the first and passing (not skipped) in the second.
+5. Commit before running `diff_check.py` and `findings_check.py`. They check committed history only, and fail on uncommitted edits to tracked files.
 
 Rules from past rejections:
 - **No tautological tests.** An expected value computed by the same constant or call as the code under test always passes. Hard-code the expected value or derive it independently.
