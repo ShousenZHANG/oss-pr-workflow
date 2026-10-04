@@ -53,6 +53,7 @@ A required tool may be missing (Go, yarn, a CI-only container) or the platform m
 2. Apply the fix, see it pass.
 3. Revert the fix (or delete the decorator / guard under test) and confirm the test fails again.
 4. Save both runs' output to files (`runs/without_fix.txt`, `runs/with_fix.txt`) and record them in `review.json`: `"fails_without_fix": true`, the `command`, `without_fix_log`, `with_fix_log`. `findings_check.py` reads the logs; a bare `true` is not accepted. Run the test verbose (`pytest -v`, `go test -v`, `jest --verbose`): both logs must show this test's own result line, failing in the first and passing (not skipped) in the second.
+   For a typing-only change (bringing a file under a type checker's strict mode), the check that fails is the type checker: save its output on the unannotated file (errors that name the test or function), then the clean run followed by the verbose test run, which shows the same tests still pass.
 5. Commit before running `diff_check.py` and `findings_check.py`. They check committed history only, and fail on uncommitted edits to tracked files.
 
 Rules from past rejections:

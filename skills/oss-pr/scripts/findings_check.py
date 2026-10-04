@@ -71,9 +71,11 @@ PROTECTED = {"behavior-change", "compatibility", "concurrency", "unused-paramete
 # A user-approved test waiver can stand in for a test on these, never on security or concurrency findings.
 WAIVABLE = {"behavior-change", "compatibility", "unused-parameter"}
 # A real failure, not a summary that merely contains the word ("fail 0", "0 failed", "test_error_path").
+# Type checkers count too, for typing-only changes: pyrefly prints `ERROR ...` lines and `N diagnostics`,
+# mypy `Found N errors`.
 FAILED_COUNT = re.compile(
-    r"(?im)\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bfail(?:ed|ures?)?:? [1-9]\d*\b|"
-    r"^\s*(?:FAILED\b|FAIL\b|--- FAIL|not ok\b|Traceback \(most recent call last\)|panic:|AssertionError|✕|×)"
+    r"(?im)\b[1-9]\d* (?:failed|failing|failures?|errors?|diagnostics?)\b|\bfail(?:ed|ures?)?:? [1-9]\d*\b|"
+    r"^\s*(?:FAILED\b|FAIL\b|ERROR\b|--- FAIL|not ok\b|Traceback \(most recent call last\)|panic:|AssertionError|✕|×)"
 )
 # One test's own result line, in the formats of pytest -v, unittest -v, go test -v, cargo, jest/vitest, surefire.
 FAIL_LINE = re.compile(r"(?i)\bfail(?:ed|ures?|s)?\b|\berror\b|✕|×|✗|\bnot ok\b|<<< FAILURE")

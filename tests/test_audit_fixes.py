@@ -135,6 +135,20 @@ class TestEvidenceIsTheSameTest:
         messages = self.check("tests/t.py::test_x_slow FAILED\n1 failed", "tests/t.py::test_x PASSED\n1 passed")
         assert any("does not show test_x failing" in m for m in messages), messages
 
+    def test_type_checker_failure_counts_as_red(self):
+        """A typing-only change is proven by the type checker: pyrefly prints `ERROR` lines and `N diagnostics`."""
+        without = (
+            "ERROR `test_x` is missing a return annotation [unannotated-return]\n"
+            "  --> tests\\t.py:3:5\n INFO 30 diagnostics\n"
+        )
+        with_ = " INFO 0 diagnostics\n\ntests/t.py::test_x PASSED\n1 passed in 0.5s\n"
+        assert self.check(without, with_) == []
+        mypy = "tests/t.py:3: error: Function is missing a return type annotation in test_x  [no-untyped-def]\n"
+        assert self.check(mypy + "Found 1 error in 1 file", with_) == []
+
+    def test_type_checker_errors_after_the_fix_are_not_clean(self):
+        assert self.check("ERROR `test_x` bad\n INFO 1 diagnostics", "ERROR `test_y` bad\ntests/t.py::test_x PASSED")
+
     def test_real_red_green_passes_across_runners(self):
         assert self.check("FAILED tests/t.py::test_x - AssertionError\n1 failed", "tests/t.py::test_x PASSED") == []
         go = {"name": "TestX", "fails_without_fix": True, "without_fix_log": "a", "with_fix_log": "b"}
