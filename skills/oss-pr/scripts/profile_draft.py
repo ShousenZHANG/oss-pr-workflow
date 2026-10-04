@@ -664,7 +664,7 @@ def main() -> None:
     small_sample = len(sample) < 10
 
     facts = {
-        "checked": f"{date.today().isoformat()} (auto, verify)",
+        "checked": "draft (auto, verify)",
         "ai_policy": f"{level} (auto, verify)",
         "ai_policy_quote": f'"{decisive.text}" ({decisive.source}:{decisive.line})' if decisive else "none found",
         "disclosure_regex": "FILL IN from the template and the merged sample below",

@@ -42,7 +42,7 @@ Scripts are in the `oss-pr` skill next to this one: `../oss-pr/scripts/` from th
 7. **Path rules.** Add a row per directory with its own conventions: scoped AGENTS.md files (the script lists them, vendored code excluded), guard scripts CI runs for a directory, generated-code directories. These rows are printed by `rules_for.py` for the files a change touches.
 8. **Local checks.** From the CI commands the script listed, write the commands that reproduce every CI job locally. Mark the ones the documented local lint target does not run (in one repo three AST guard scripts ran only in CI and turned PRs red), and requirements such as "every commit must build on its own".
 9. **How PRs die here.** From step 2, one table row per cause (bot rule, duplicate, merits, AI policy in practice, stale, conflict, CLA, DCO) with an example PR.
-10. **Show the profile to the user** and let them correct it. Then remove `(auto, verify)` from the facts they confirmed and set `checked:` to today.
+10. **Show the profile to the user** and let them correct it. Then remove `(auto, verify)` from the facts they confirmed and change `checked: draft` to today's date. `pacing.py` refuses to open a PR while the profile is a draft, a bundled example, or checked more than 30 days ago.
 
 ## Profile shape
 

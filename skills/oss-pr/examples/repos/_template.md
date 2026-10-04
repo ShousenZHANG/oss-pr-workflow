@@ -4,7 +4,7 @@ Profile layout. The `## Facts` block is machine-read: keep `- key: value` lines 
 
 ## Facts
 
-- checked: YYYY-MM-DD
+- checked: YYYY-MM-DD (the day the user checked it; `draft` until then)
 - ai_policy: none | disclosure | human-in-loop | issue-restricted | banned-for-newcomers | banned
 - ai_policy_quote: "the sentence that decides the level" (source file)
 - disclosure_regex: regex the PR description must match, e.g. (?m)^From \S+

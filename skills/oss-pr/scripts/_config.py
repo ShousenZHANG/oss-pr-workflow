@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = SKILL_ROOT / "examples" / "repos"
+PROFILE_MAX_AGE_DAYS = 30
 
 DEFAULTS: dict[str, str] = {
     "sources": "issues, campaigns, self-found",
@@ -100,6 +102,27 @@ def load_profile(repo: str) -> tuple[dict[str, str], list[tuple[str, str]], Path
         return {}, [], None
     text = path.read_text(encoding="utf-8")
     return parse_facts(text, "Facts"), parse_path_rules(text), path
+
+
+def profile_status(facts: dict[str, str], path: Path | None, today: date | None = None) -> str | None:
+    """Why the profile cannot back a public action yet, or None when the user checked it within 30 days.
+
+    A draft says `checked: draft` until the user has read it; a shipped example is
+    dated but was never checked by this user against the repository as it is now.
+    """
+    if path is None:
+        return "no profile for this repo; run phase 1 (oss-pr-profile) first"
+    if EXAMPLES_DIR in path.resolve().parents:
+        return f"the profile is a bundled example ({path.name}), not one you checked; run phase 1 to make your own"
+    checked = (facts.get("checked") or "").strip()
+    try:
+        day = date.fromisoformat(checked[:10])
+    except ValueError:
+        return f"profile not checked yet (checked: {checked or 'missing'}); review it and set checked: to today"
+    age = ((today or date.today()) - day).days
+    if age > PROFILE_MAX_AGE_DAYS:
+        return f"profile checked {age} days ago (limit {PROFILE_MAX_AGE_DAYS}); re-check it against the repo"
+    return None
 
 
 def parse_path_rules(text: str) -> list[tuple[str, str]]:

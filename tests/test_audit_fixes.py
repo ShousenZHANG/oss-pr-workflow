@@ -1,10 +1,15 @@
 """Gaps found by the 2026-10-04 audit of v1.0.0. Each test reproduces a case a gate let through."""
 
 import json
+from datetime import date, datetime, timedelta, timezone
 
+import pacing
+import pytest
+from _config import load_profile, parse_facts, profile_status
 from conftest import git, run
 from diff_check import added_lines
 from findings_check import changed_ranges, check_tests
+from pacing import Limits, MyPR, decide
 
 
 class TestDiffParsing:
@@ -128,3 +133,57 @@ class TestEvidenceIsTheSameTest:
             "b": "  ✓ renders empty list (3 ms)\nTests: 1 passed",
         }
         assert check_tests([jest], read_text=logs.get) == []
+
+
+class TestPacingFailsClosed:
+    NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    LIMITS = Limits(repo_limit=None, per_repo_cap=3, min_interval=timedelta(hours=24), silent_after=timedelta(days=7))
+
+    def test_unreadable_response_on_an_old_pr_stops(self):
+        """`gh pr view` failed for a 10-day-old PR; pacing treated it as answered and said OK."""
+        old = MyPR(number=7, state="OPEN", created_at=self.NOW - timedelta(days=10), labels=(), responded=None)
+        results = decide([old], self.LIMITS, self.NOW)
+        assert results[0][0] == "STOP" and "#7" in results[0][1], results
+
+    def test_full_search_page_is_not_complete(self, monkeypatch):
+        rows = [{"number": i, "state": "MERGED", "createdAt": "2026-01-01T00:00:00Z", "labels": []} for i in range(100)]
+        monkeypatch.setattr(pacing, "gh_json", lambda args: rows)
+        with pytest.raises(RuntimeError, match="truncated"):
+            pacing.my_prs("a/b", "me", timedelta(days=7), self.NOW)
+
+
+class TestProfileStatus:
+    TODAY = date(2026, 10, 4)
+
+    def test_checked_recently(self, tmp_path):
+        assert profile_status({"checked": "2026-09-20"}, tmp_path / "a__b.md", self.TODAY) is None
+
+    @pytest.mark.parametrize(
+        ("checked", "expected"),
+        [("draft", "not checked"), ("", "not checked"), ("2026-08-01", "64 days ago")],
+    )
+    def test_unchecked_or_stale(self, tmp_path, checked, expected):
+        assert expected in profile_status({"checked": checked}, tmp_path / "a__b.md", self.TODAY)
+
+    def test_missing_profile(self):
+        assert "no profile" in profile_status({}, None, self.TODAY)
+
+    def test_bundled_example_is_not_a_checked_profile(self, tmp_path, monkeypatch):
+        """dify and airflow had no profile of their own; the dated example passed as checked."""
+        monkeypatch.setenv("OSS_PR_HOME", str(tmp_path))
+        facts, _rules, path = load_profile("langgenius/dify")
+        assert path is not None and "example" in profile_status(facts, path, self.TODAY)
+
+    def test_draft_marker_survives_parsing(self):
+        assert parse_facts("- checked: draft (auto, verify)\n")["checked"] == "draft"
+
+
+def test_old_open_pr_beyond_a_full_mixed_search_is_still_seen(monkeypatch):
+    """100 merged PRs filled the only search, so an older open PR never reached the cap or silence rules."""
+    now = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    merged = [{"number": i, "state": "MERGED", "createdAt": "2026-09-01T00:00:00Z", "labels": []} for i in range(100)]
+    still_open = [{"number": 500, "state": "OPEN", "createdAt": "2026-06-01T00:00:00Z", "labels": []}]
+    monkeypatch.setattr(pacing, "gh_json", lambda args: still_open if "open" in args else merged)
+    monkeypatch.setattr(pacing, "responded", lambda repo, number, me: False)
+    prs = pacing.my_prs("a/b", "me", timedelta(days=7), now)
+    assert [p.number for p in prs if p.state == "OPEN"] == [500]

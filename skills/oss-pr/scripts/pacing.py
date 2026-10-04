@@ -7,8 +7,10 @@ Checks, in order (any STOP blocks a new PR; a failed lookup is a STOP, never a G
   - FREEZE: one of your PRs here carries a spam / quality-violation / suspicious label
   - the repo's own open-PR limit (profile: open_pr_limit)
   - your per-repo cap (config: per_repo_open_cap, default 3)
+  - the profile is your own, checked within 30 days (not a draft, not a bundled example)
   - all your open PRs here older than N days have had no response from anyone else
-    (config: pause_after_silent_days, default 7): work elsewhere until someone answers
+    (config: pause_after_silent_days, default 7): work elsewhere until someone answers;
+    replies that cannot be read are a STOP
   - the last PR you opened here is more recent than the minimum interval
     (config: per_repo_min_interval_hours, default 24)
 Exit status 0 means GO, 1 means STOP.
@@ -21,10 +23,11 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from _config import config_int, load_config, load_profile
+from _config import config_int, load_config, load_profile, profile_status
 from _gh import current_login, gh_json, is_bot, parse_iso, run_main, use_utf8_stdout
 from base_rate import merge_history
 
+SEARCH_LIMIT = 100
 FLAG_WORDS = ("spam", "quality violation", "suspicious", "invalid", "ai slop", "low quality")
 
 
@@ -78,6 +81,12 @@ def decide(prs: list[MyPR], limits: Limits, now: datetime) -> list[tuple[str, st
     old = [p for p in open_prs if now - p.created_at >= limits.silent_after]
     if open_prs and old and len(old) == len(open_prs) and all(p.responded is False for p in old):
         out.append(("STOP", f"all {len(old)} open PRs have had no response for {limits.silent_after.days}+ days"))
+    unread = [p for p in old if p.responded is None]
+    if unread:
+        numbers = ", ".join(f"#{p.number}" for p in unread)
+        out.append(
+            ("STOP", f"could not read the replies on {numbers}; the silence rule cannot be checked (fails closed)")
+        )
     if prs:
         latest = max(p.created_at for p in prs)
         if now - latest < limits.min_interval:
@@ -113,11 +122,16 @@ def ai_gate(ai_policy: str, merged_last_year: int | None) -> tuple[str, str] | N
 
 def my_prs(repo: str, me: str, silent_after: timedelta, now: datetime) -> list[MyPR]:
     """Your PRs in the repo. A failed search is an error, never "no PRs": that would wave a new PR through."""
-    items = gh_json(
-        ["search", "prs", "--repo", repo, "--author", me, "--limit", "100", "--json", "number,state,createdAt,labels"]
-    )
-    if items is None:
+    search = ["search", "prs", "--repo", repo, "--author", me, "--limit", str(SEARCH_LIMIT)]
+    fields = ["--json", "number,state,createdAt,labels"]
+    recent = gh_json([*search, "--sort", "created", "--order", "desc", *fields])
+    # Open PRs get their own search: in a mixed-state list of 100 an old open PR can fall off the end.
+    open_items = gh_json([*search, "--state", "open", *fields])
+    if recent is None or open_items is None:
         raise RuntimeError(f"could not list your PRs in {repo}; pacing cannot be checked (fails closed)")
+    if len(open_items) >= SEARCH_LIMIT:
+        raise RuntimeError(f"your open-PR list in {repo} is truncated at {SEARCH_LIMIT}; pacing fails closed")
+    items = list({item["number"]: item for item in [*recent, *open_items]}.values())
     out = []
     for item in items:
         created = parse_iso(item["createdAt"])
@@ -146,7 +160,7 @@ def main() -> None:
     if not me:
         raise RuntimeError("could not determine your GitHub login (gh auth status); pacing fails closed")
     config = load_config()
-    facts, _rules, _path = load_profile(args.repo)
+    facts, _rules, path = load_profile(args.repo)
     raw_limit = facts.get("open_pr_limit", "").split(" ")[0]
     limits = Limits(
         repo_limit=int(raw_limit) if raw_limit.isdigit() else None,
@@ -164,6 +178,9 @@ def main() -> None:
     gate = ai_gate(ai_policy, merged)
     if gate:
         results = [gate, *[r for r in results if r[0] == "STOP" or not gate]]
+    problem = profile_status(facts, path)
+    if problem:
+        results = [("STOP", problem), *[r for r in results if r[0] == "STOP"]]
     for status, reason in results:
         print(f"{status}: {reason}")
     stop = any(status == "STOP" for status, _ in results)
