@@ -42,7 +42,11 @@ def cache_dir() -> Path:
 
 
 def parse_facts(text: str, section: str | None = None) -> dict[str, str]:
-    """Read `- key: value` lines, optionally only inside a `## <section>` block."""
+    """Read `- key: value` lines, optionally only inside a `## <section>` block.
+
+    The first occurrence of a key wins, so explanatory notes further down a file
+    (`- sources: ...` describing the options) never override the real setting.
+    """
     facts: dict[str, str] = {}
     inside = section is None
     for line in text.splitlines():
@@ -52,7 +56,7 @@ def parse_facts(text: str, section: str | None = None) -> dict[str, str]:
         if not inside:
             continue
         match = _FACT_LINE.match(line)
-        if match:
+        if match and match.group(1) not in facts:
             value = re.sub(r"\s+\(auto[^)]*\)$", "", match.group(2))
             facts[match.group(1)] = value
     return facts

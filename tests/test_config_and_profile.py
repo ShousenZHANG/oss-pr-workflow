@@ -192,3 +192,12 @@ class TestProfileHelpers:
     def test_percentile(self):
         assert percentile([1, 2, 3, 4, 100], 0.9) == 100
         assert percentile([], 0.9) == 0
+
+
+def test_notes_below_settings_do_not_override_them(tmp_path, monkeypatch):
+    """First real use: a `- sources: ...` line in the notes replaced the real setting."""
+    monkeypatch.setenv("OSS_PR_HOME", str(tmp_path))
+    (tmp_path / "config.md").write_text(
+        "- sources: issues\n\nNotes:\n\n- sources: `issues` = existing issues only\n", encoding="utf-8"
+    )
+    assert load_config()["sources"] == "issues"
