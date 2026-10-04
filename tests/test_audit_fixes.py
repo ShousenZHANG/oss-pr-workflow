@@ -1,9 +1,12 @@
 """Gaps found by the 2026-10-04 audit of v1.0.0. Each test reproduces a case a gate let through."""
 
 import json
+import sys
 from datetime import date, datetime, timedelta, timezone
 
+import issue_prs
 import pacing
+import pr_status
 import pytest
 from _config import load_profile, parse_facts, profile_status, scope_globs, split_globs
 from conftest import git, run
@@ -313,3 +316,30 @@ class TestCiCommands:
         """Only the first line of a multi-line `run: |` was kept, so later checks never reached the profile."""
         text = "steps:\n  - run: |\n      ruff check .\n      pytest -q \\\n        --cov=src\n      echo done\n"
         assert workflow_commands(text) == ["ruff check .", "pytest -q --cov=src"]
+
+
+class TestFailedLookupsAreShown:
+    def test_status_with_failed_searches_is_not_zero(self, monkeypatch, capsys):
+        """Both searches failed and the report said "0 open PRs" with a clean exit."""
+        monkeypatch.setattr(pr_status, "gh_json", lambda args: None)
+        monkeypatch.setattr(sys, "argv", ["pr_status.py", "--author", "me"])
+        with pytest.raises(SystemExit) as exit_info:
+            pr_status.main()
+        out = capsys.readouterr().out
+        assert exit_info.value.code == 1
+        assert "ERROR: could not search your open PRs" in out and "0 open PRs" not in out, out
+
+    def test_unread_referencing_pr_makes_the_rate_partial(self, monkeypatch, capsys):
+        """One of two closed PRs could not be read and the rate came out as a complete 100%."""
+        merged = {"merged_at": "2026-09-01T00:00:00Z", "state": "closed", "user": {"login": "x"}, "title": "t"}
+        merged |= {"created_at": "2026-08-01T00:00:00Z", "closed_at": "2026-09-01T00:00:00Z", "body": "Fixes #5"}
+        merged |= {"merged_by": {"login": "m"}}
+        responses = {"repos/a/b/issues/5": {"state": "open", "title": "bug", "labels": []}, "repos/a/b/pulls/1": merged}
+        monkeypatch.setattr(issue_prs, "gh_json", lambda args: responses.get(args[1]))
+        monkeypatch.setattr(issue_prs, "referencing_prs", lambda repo, issue: [1, 2])
+        monkeypatch.setattr(sys, "argv", ["issue_prs.py", "a/b", "5", "--no-comments"])
+        with pytest.raises(SystemExit) as exit_info:
+            issue_prs.main()
+        out = capsys.readouterr().out
+        assert exit_info.value.code == 1
+        assert "#2 could not be read" in out and "partial" in out and "rate 100.0%" not in out, out

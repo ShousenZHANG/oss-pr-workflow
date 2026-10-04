@@ -113,6 +113,8 @@ def main() -> None:
     for number in referencing_prs(args.repo, args.issue):
         pr = gh_json(["api", f"repos/{args.repo}/pulls/{number}"])
         if pr is None:
+            counts["UNREAD"] += 1
+            print(f"  #{number} could not be read (it may be an open PR on this issue)")
             continue
         state = pr_state(pr)
         kind = ""
@@ -143,6 +145,9 @@ def main() -> None:
     merged, closed = counts["MERGED"], counts["CLOSED"]
     decided = merged + closed
     rate = f"{100 * merged / decided:.1f}%" if decided else "n/a"
+    unread = counts["UNREAD"]
+    if unread:
+        rate = f"partial: {rate} of the {decided} decided PR(s) read, {unread} unread"
     scope = " (matching --diff-match only)" if pattern else ""
     print(
         f"\n{args.repo}#{args.issue}{scope}: merged {merged}, closed-unmerged {closed}, "
@@ -158,6 +163,9 @@ def main() -> None:
         print(warning)
     if counts["UNKNOWN_KIND"]:
         print(f"WARNING: {counts['UNKNOWN_KIND']} PRs could not be classified; the rate excludes them")
+    if unread:
+        print(f"ERROR: {unread} referencing PR(s) could not be read; one may already fix this issue. Run again.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

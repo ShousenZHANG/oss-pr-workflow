@@ -5,11 +5,13 @@
 For each open PR: merge state, CI counts and failing check names, review
 decision, human reviews, and human comments newer than --since-days. Ends with
 the count of PRs merged in the last 12 months outside your own repositories.
+A lookup that fails is printed as an ERROR and the exit status is 1; it is never shown as zero.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import Counter
 from datetime import timedelta
 
@@ -41,11 +43,12 @@ def human(author: dict | None) -> bool:
     return bool(login) and not is_bot(login) and "copilot" not in login.lower()
 
 
-def report(repo: str, number: int, since_iso: str) -> None:
+def report(repo: str, number: int, since_iso: str) -> bool:
+    """Print one PR's state; False when part of it could not be read."""
     pr = gh_json(["pr", "view", str(number), "--repo", repo, "--json", VIEW_FIELDS])
     if pr is None:
         print(f"==== {repo}#{number}  FETCH FAILED")
-        return
+        return False
     counts, failed = summarize_checks(pr["statusCheckRollup"])
     draft = " DRAFT" if pr["isDraft"] else ""
     print(f"==== {repo}#{number}{draft} {pr['title'][:80]}")
@@ -65,11 +68,15 @@ def report(repo: str, number: int, since_iso: str) -> None:
         if human(comment.get("author")) and comment["createdAt"] >= since_iso:
             body = " ".join((comment.get("body") or "").split())
             print(f"     COMMENT @{comment['author']['login']} {comment['createdAt'][:16]}: {body[:300]}")
-    inline = gh_json(["api", f"repos/{repo}/pulls/{number}/comments?per_page=100"]) or []
+    inline = gh_json(["api", f"repos/{repo}/pulls/{number}/comments?per_page=100"])
+    if inline is None:
+        print("     INLINE comments: FETCH FAILED")
+        return False
     for c in inline:
         if human(c.get("user")) and c["created_at"] >= since_iso:
             body = " ".join((c.get("body") or "").split())
             print(f"     INLINE @{c['user']['login']} {c['created_at'][:16]} {c['path']}:{c.get('line')}: {body[:200]}")
+    return True
 
 
 def main() -> None:
@@ -84,54 +91,62 @@ def main() -> None:
     if not login:
         raise SystemExit("could not determine the GitHub login; pass --author")
     since_iso = days_ago(args.since_days).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A failed lookup is reported as failed, never as zero: "0 open PRs" would read as a fact.
+    problems: list[str] = []
 
     def foreign(item: dict) -> bool:
         return args.include_own or not item["repository"]["nameWithOwner"].lower().startswith(f"{login.lower()}/")
 
-    open_prs = (
-        gh_json(
-            ["search", "prs", "--author", login, "--state", "open", "--limit", "100", "--json", "repository,number"]
+    open_prs = gh_json(
+        ["search", "prs", "--author", login, "--state", "open", "--limit", "100", "--json", "repository,number"]
+    )
+    if open_prs is None:
+        print("ERROR: could not search your open PRs; nothing below says how many you have")
+        problems.append("open-PR search failed")
+    else:
+        warning = truncation_warning(len(open_prs), 100, "the open-PR search")
+        if warning:
+            print(warning)
+        open_prs = sorted(
+            (p for p in open_prs if foreign(p)), key=lambda p: (p["repository"]["nameWithOwner"], p["number"])
         )
-        or []
-    )
-    warning = truncation_warning(len(open_prs), 100, "the open-PR search")
-    if warning:
-        print(warning)
-    open_prs = sorted(
-        (p for p in open_prs if foreign(p)), key=lambda p: (p["repository"]["nameWithOwner"], p["number"])
-    )
-    print(f"@{login}: {len(open_prs)} open PRs; human comments shown since {since_iso[:10]}\n")
-    for item in open_prs:
-        report(item["repository"]["nameWithOwner"], item["number"], since_iso)
+        print(f"@{login}: {len(open_prs)} open PRs; human comments shown since {since_iso[:10]}\n")
+        for item in open_prs:
+            if not report(item["repository"]["nameWithOwner"], item["number"], since_iso):
+                problems.append(f"{item['repository']['nameWithOwner']}#{item['number']} not fully read")
 
     year_ago = (days_ago(0) - timedelta(days=365)).strftime("%Y-%m-%d")
-    merged = (
-        gh_json(
-            [
-                "search",
-                "prs",
-                "--author",
-                login,
-                "--merged",
-                "--merged-at",
-                f">={year_ago}",
-                "--limit",
-                "1000",
-                "--json",
-                "repository,number,closedAt",
-            ]
-        )
-        or []
+    merged = gh_json(
+        [
+            "search",
+            "prs",
+            "--author",
+            login,
+            "--merged",
+            "--merged-at",
+            f">={year_ago}",
+            "--limit",
+            "1000",
+            "--json",
+            "repository,number,closedAt",
+        ]
     )
-    warning = truncation_warning(len(merged), 1000, "the merged-PR search")
-    if warning:
-        print(warning)
-    merged = [m for m in merged if foreign(m)]
-    per_repo = Counter(m["repository"]["nameWithOwner"] for m in merged)
-    recent = [m for m in merged if parse_iso(m["closedAt"]) >= days_ago(args.since_days)]
-    print(f"\nmerged since {year_ago} outside your repositories: {len(merged)}  {dict(per_repo.most_common())}")
-    for m in recent:
-        print(f"  recently merged: {m['repository']['nameWithOwner']}#{m['number']} ({m['closedAt'][:10]})")
+    if merged is None:
+        print(f"\nERROR: could not search your merged PRs since {year_ago}; the merged count is unknown")
+        problems.append("merged-PR search failed")
+    else:
+        warning = truncation_warning(len(merged), 1000, "the merged-PR search")
+        if warning:
+            print(warning)
+        merged = [m for m in merged if foreign(m)]
+        per_repo = Counter(m["repository"]["nameWithOwner"] for m in merged)
+        recent = [m for m in merged if parse_iso(m["closedAt"]) >= days_ago(args.since_days)]
+        print(f"\nmerged since {year_ago} outside your repositories: {len(merged)}  {dict(per_repo.most_common())}")
+        for m in recent:
+            print(f"  recently merged: {m['repository']['nameWithOwner']}#{m['number']} ({m['closedAt'][:10]})")
+    if problems:
+        print("\nINCOMPLETE: " + "; ".join(problems))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
