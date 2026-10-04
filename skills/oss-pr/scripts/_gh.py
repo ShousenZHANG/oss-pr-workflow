@@ -6,6 +6,7 @@ installed and authenticated (`gh auth status`).
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
 import subprocess
@@ -232,9 +233,63 @@ def new_side_ranges(patch: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def _diff_path(text: str, prefix: str) -> str | None:
+    """Path from a `--- a/x` or `+++ b/x` header; None for /dev/null. Git C-quotes unusual names."""
+    text = text.rstrip("\t")
+    if text.startswith('"') and text.endswith('"'):
+        text = codecs.escape_decode(text[1:-1].encode("utf-8"))[0].decode("utf-8", errors="replace")
+    if text == "/dev/null":
+        return None
+    return text[len(prefix) :] if text.startswith(prefix) else text
+
+
+def split_diff(diff: str) -> list[tuple[str | None, str | None, list[str]]]:
+    """(old path, new path, hunk lines with their `@@` headers) for each file of a unified diff.
+
+    Lines inside a hunk are counted against the hunk header, so an added line that
+    itself starts with `++ ` (shown as `+++ `) stays content instead of being read
+    as the next file's header. /dev/null (an added or deleted file) is None.
+    """
+    files: list[tuple[str | None, str | None, list[str]]] = []
+    old_path: str | None = None
+    old_left = new_left = 0
+    for line in diff.splitlines():
+        if old_left > 0 or new_left > 0:
+            files[-1][2].append(line)
+            if line.startswith("+"):
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif not line.startswith("\\"):
+                old_left -= 1
+                new_left -= 1
+            continue
+        header = _HUNK_HEADER.match(line)
+        if header and files:
+            old_left = int(header.group(2)) if header.group(2) is not None else 1
+            new_left = int(header.group(4)) if header.group(4) is not None else 1
+            files[-1][2].append(line)
+        elif line.startswith("--- "):
+            old_path = _diff_path(line[4:], "a/")
+        elif line.startswith("+++ "):
+            files.append((old_path, _diff_path(line[4:], "b/"), []))
+            old_path = None
+    return files
+
+
 def git(args: list[str], cwd: str | None = None) -> str:
-    """Run a local git command and return stdout; raise on failure."""
-    result = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    """Run a local git command and return stdout; raise on failure.
+
+    core.quotePath=false keeps non-ASCII paths (`docs/中文.md`) readable instead of octal-escaped.
+    """
+    result = subprocess.run(
+        ["git", "-c", "core.quotePath=false", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()[:300]}")
     return result.stdout

@@ -27,7 +27,7 @@ import sys
 from dataclasses import dataclass
 
 from _config import glob_match, load_profile, scope_globs, truthy
-from _gh import default_base, run_git_or_exit, use_utf8_stdout
+from _gh import default_base, run_git_or_exit, split_diff, use_utf8_stdout
 
 LOCK_FILES = (
     "**/package-lock.json",
@@ -64,23 +64,19 @@ class Finding:
 def added_lines(diff: str) -> dict[str, list[tuple[int, str]]]:
     """path -> [(new line number, text)] for every added line of a unified diff (from `git diff -U0`)."""
     result: dict[str, list[tuple[int, str]]] = {}
-    path, line_no = None, 0
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
-            target = raw[4:]
-            path = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
-            continue
-        hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
-        if hunk:
-            line_no = int(hunk.group(1))
-            continue
+    for _old, path, body in split_diff(diff):
         if path is None:
             continue
-        if raw.startswith("+") and not raw.startswith("+++"):
-            result.setdefault(path, []).append((line_no, raw[1:]))
-            line_no += 1
-        elif not raw.startswith("-"):
-            line_no += 1
+        line_no = 0
+        for raw in body:
+            hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
+            if hunk:
+                line_no = int(hunk.group(1))
+            elif raw.startswith("+"):
+                result.setdefault(path, []).append((line_no, raw[1:]))
+                line_no += 1
+            elif not raw.startswith(("-", "\\")):
+                line_no += 1
     return result
 
 

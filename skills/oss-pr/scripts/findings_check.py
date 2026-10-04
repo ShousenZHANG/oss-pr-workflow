@@ -40,7 +40,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-from _gh import default_base, git, new_side_ranges, run_git_or_exit, use_utf8_stdout
+from _gh import base_side_ranges, default_base, git, new_side_ranges, run_git_or_exit, split_diff, use_utf8_stdout
 
 SEVERITIES = {"critical", "high", "medium", "low"}
 CATEGORIES = {
@@ -75,24 +75,17 @@ class Finding:
 
 
 def changed_ranges(diff: str) -> dict[str, list[tuple[int, int]]]:
-    """path -> new-side ranges of changed hunks, from `git diff -U0` output."""
+    """path -> ranges of changed hunks, from `git diff -U0` output.
+
+    New-side lines for added and modified files; old-side lines for a deleted file,
+    which has no new side but still has to be reviewed.
+    """
     result: dict[str, list[tuple[int, int]]] = {}
-    path = None
-    chunk: list[str] = []
-
-    def flush() -> None:
-        if path is not None:
-            result[path] = new_side_ranges("\n".join(chunk))
-
-    for line in diff.splitlines():
-        if line.startswith("+++ "):
-            flush()
-            target = line[4:]
-            path = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
-            chunk = []
-        elif line.startswith("@@"):
-            chunk.append(line)
-    flush()
+    for old, new, body in split_diff(diff):
+        if new is not None:
+            result[new] = new_side_ranges("\n".join(body))
+        elif old is not None:
+            result[old] = base_side_ranges("\n".join(body))
     return result
 
 
