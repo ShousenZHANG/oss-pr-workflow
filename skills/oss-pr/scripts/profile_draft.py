@@ -498,7 +498,13 @@ def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str],
         and CONTRIB_DOC_TOPIC.search(p.rsplit("/", 1)[-1])
     ]
     workflow_paths, script_paths = automation_paths(tree)
-    docs = resolve_symlink_docs(repo, branch, fetch_many(repo, branch, list(dict.fromkeys(doc_paths))[:40]), set(tree))
+    wanted = list(dict.fromkeys(doc_paths))[:40]
+    fetched = fetch_many(repo, branch, wanted)
+    missing = [p for p in wanted if p not in fetched]
+    if missing:
+        # A policy file that exists but was not read must not look like "no policy found".
+        print(f"WARNING: could not read {len(missing)} policy documents: {', '.join(missing[:8])}", file=sys.stderr)
+    docs = resolve_symlink_docs(repo, branch, fetched, set(tree))
     template_texts = fetch_many(repo, branch, templates)
     automation = fetch_many(repo, branch, workflow_paths + script_paths)
     unread = [p for p in workflow_paths + script_paths if p not in automation]

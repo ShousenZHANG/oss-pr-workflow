@@ -2,11 +2,15 @@
 
 import json
 import sys
+import urllib.error
 from datetime import date, datetime, timedelta, timezone
 
+import _gh
+import base_rate
 import contention_map
 import issue_prs
 import pacing
+import pick_repo
 import pr_status
 import pytest
 from _config import load_profile, parse_facts, profile_status, scope_globs, split_globs
@@ -14,6 +18,7 @@ from conftest import git, run
 from contention_map import check, shift_ranges
 from diff_check import added_lines, check_commits
 from findings_check import changed_ranges, check_tests
+from issue_prs import link_kind
 from ledger import Entry, parse, render
 from pacing import Limits, MyPR, decide
 from pr_body_check import check_disclosure, check_template
@@ -401,3 +406,40 @@ def test_base_drift_reads_one_compare_per_pr(monkeypatch):
     assert contention_map.base_drift("o/r", compare_cap=2)("1", pr, "b.py") is None  # full list: unknown
     monkeypatch.setattr(contention_map, "gh_json", lambda args: None)
     assert contention_map.base_drift("o/r")("1", pr, "a.py") is None
+
+
+class TestSmallDataFixes:
+    def test_raw_fallback_keeps_the_ref(self, monkeypatch):
+        """When raw.githubusercontent.com failed, the contents API read the default branch instead of the ref."""
+
+        def offline(*args, **kwargs):
+            raise urllib.error.URLError("offline")
+
+        calls = []
+        monkeypatch.setattr(_gh.urllib.request, "urlopen", offline)
+        monkeypatch.setattr(_gh, "gh", lambda args: calls.append(args) or "text")
+        assert _gh.raw_file("o/r", "CONTRIBUTING.md", "abc123") == "text"
+        assert calls[-1][1] == "repos/o/r/contents/CONTRIBUTING.md?ref=abc123"
+        _gh.raw_file("o/r", "CONTRIBUTING.md")
+        assert calls[-1][1] == "repos/o/r/contents/CONTRIBUTING.md"
+
+    def test_closing_keyword_for_another_repo_is_not_closing_here(self):
+        assert link_kind("Refs #42; Fixes other/project#42", 42, "a/b") == "reference"
+        assert link_kind("Fixes A/B#42", 42, "a/b") == "closing"
+        assert link_kind("Fixes #42", 42, "a/b") == "closing"
+        assert link_kind("Fixes other/project#42", 42) == "reference"
+
+    def test_pick_repo_uses_the_same_maintainer_window_as_base_rate(self, monkeypatch):
+        """pick_repo counted mergers over 14 days and base_rate over 90: one person, two answers."""
+        seen = []
+        monkeypatch.setattr(pick_repo, "collect_closed", lambda repo, days: [])
+        monkeypatch.setattr(pick_repo, "mergers", lambda repo, days: seen.append(days) or set())
+        monkeypatch.setattr(pick_repo, "gh_json", lambda args: {})
+        monkeypatch.setattr(pick_repo, "fetch_docs", lambda repo, branch, tree: ({}, {}, {}))
+        pick_repo.repo_facts("o/r", 14)
+        assert seen == [base_rate.MAINTAINER_WINDOW_DAYS]
+
+    def test_comment_after_the_close_is_not_the_reason(self):
+        """With no comment before the close, a reminder two days later was reported as why it closed."""
+        later = [{"created_at": "2026-10-03T00:00:00Z", "user": {"login": "someone"}, "body": "AI review reminder"}]
+        assert base_rate.closing_comment(later, "2026-10-01T00:00:00Z") is None

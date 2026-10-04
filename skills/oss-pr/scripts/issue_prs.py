@@ -47,10 +47,18 @@ def referencing_prs(repo: str, issue: int) -> list[int]:
     return sorted({int(n) for n in out.split()})
 
 
-def link_kind(body: str, issue: int) -> str:
-    """`closing` when the PR body uses a GitHub closing keyword for this issue, else `reference`."""
-    closing = re.compile(rf"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*(?:[\w.-]+/[\w.-]+)?#{issue}\b")
-    return "closing" if closing.search(body or "") else "reference"
+def link_kind(body: str, issue: int, repo: str | None = None) -> str:
+    """`closing` when the PR body uses a GitHub closing keyword for this issue, else `reference`.
+
+    `Fixes other/project#42` closes issue 42 of another repository, not this one; an
+    owner/repo prefix counts only when it names `repo`.
+    """
+    closing = re.compile(rf"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*([\w.-]+/[\w.-]+)?#{issue}\b")
+    for match in closing.finditer(body or ""):
+        qualifier = match.group(1)
+        if qualifier is None or (repo and qualifier.lower() == repo.lower()):
+            return "closing"
+    return "reference"
 
 
 def issue_warning(issue: dict) -> str | None:
@@ -129,7 +137,7 @@ def main() -> None:
                 continue
             kind = " kind=match"
         counts[state] += 1
-        link = link_kind(pr.get("body") or "", args.issue)
+        link = link_kind(pr.get("body") or "", args.issue, args.repo)
         if state == "CLOSED":
             closed_by_link[link] += 1
         end = (pr.get("merged_at") or pr.get("closed_at") or "-")[:10]

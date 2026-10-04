@@ -204,7 +204,8 @@ def closing_comment(comments: list[dict], closed_at: str, closer: str = "") -> d
     closure done silently by a person.
     """
     cutoff = parse_iso(closed_at) + timedelta(minutes=10) if closed_at else None
-    before = [c for c in comments if cutoff is None or parse_iso(c["created_at"]) <= cutoff] or comments
+    # Only what was said by the time of closing can explain it; a later comment is about something else.
+    before = [c for c in comments if cutoff is None or parse_iso(c["created_at"]) <= cutoff]
     useful = [c for c in before if not BOILERPLATE.search(" ".join((c.get("body") or "").split()))]
     by_closer = [c for c in useful if closer and c["user"]["login"] == closer]
     if by_closer:

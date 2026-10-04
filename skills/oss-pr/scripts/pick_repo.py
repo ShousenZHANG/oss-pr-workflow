@@ -19,13 +19,13 @@ import sys
 from collections import Counter
 
 from _gh import check_api_budget, days_ago, gh_json, parse_iso, run_main, use_utf8_stdout
-from base_rate import collect_closed, external_only, mergers
+from base_rate import MAINTAINER_WINDOW_DAYS, collect_closed, external_only, mergers
 from profile_draft import classify_ai_policy, fetch_docs
 
 
 def repo_facts(repo: str, days: float) -> dict:
     rows = collect_closed(repo, days)
-    maintainers = mergers(repo, days)
+    maintainers = mergers(repo, max(days, MAINTAINER_WINDOW_DAYS))  # same definition as base_rate.py
     external = external_only(rows, maintainers)
     merged_all = [r for r in rows if r.merged]
     top_author, top_count = Counter(r.author for r in merged_all).most_common(1)[0] if merged_all else ("-", 0)

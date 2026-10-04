@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -124,7 +125,9 @@ def raw_file(repo: str, path: str, ref: str = "HEAD") -> str | None:
         with urllib.request.urlopen(url, timeout=20) as response:
             return response.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, TimeoutError, OSError):
-        return gh(["api", f"repos/{repo}/contents/{path}", "-H", "Accept: application/vnd.github.raw"])
+        # Same ref as asked for: without it the API reads the default branch, a different version.
+        query = "" if ref == "HEAD" else f"?ref={urllib.parse.quote(ref, safe='')}"
+        return gh(["api", f"repos/{repo}/contents/{path}{query}", "-H", "Accept: application/vnd.github.raw"])
 
 
 KNOWN_BOT_NAMES = (
