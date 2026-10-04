@@ -10,6 +10,7 @@ from conftest import git, run
 from diff_check import added_lines
 from findings_check import changed_ranges, check_tests
 from pacing import Limits, MyPR, decide
+from profile_draft import classify_ai_policy, ranked_commands, workflow_commands
 
 
 class TestDiffParsing:
@@ -187,3 +188,65 @@ def test_old_open_pr_beyond_a_full_mixed_search_is_still_seen(monkeypatch):
     monkeypatch.setattr(pacing, "responded", lambda repo, number, me: False)
     prs = pacing.my_prs("a/b", "me", timedelta(days=7), now)
     assert [p.number for p in prs if p.state == "OPEN"] == [500]
+
+
+class TestAiPolicyKeepsBans:
+    def test_grammar_allowance_does_not_lift_a_code_ban(self):
+        text = "We do not accept AI-generated code.\n\nAI tools are allowed to help with documentation grammar.\n"
+        assert classify_ai_policy({"CONTRIBUTING.md": text})[0] == "banned"
+
+    def test_lowercase_ban(self):
+        assert classify_ai_policy({"CONTRIBUTING.md": "we do not accept ai-generated code.\n"})[0] == "banned"
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "We do not accept AI-generated code you do not understand.",
+            "PRs that are entirely AI-generated will be closed; do not submit them.",
+            "Do not submit AI output without reviewing it yourself.",
+            "We do not accept low-effort AI-generated pull requests.",
+        ],
+    )
+    def test_conditional_ban_means_a_human_in_the_loop(self, line):
+        assert classify_ai_policy({"CONTRIBUTING.md": line + "\n"})[0] == "human-in-loop"
+
+    def test_general_allowance_with_partial_bans_is_human_in_loop(self):
+        """home-assistant: AI welcome as an aid; autonomous agents and AI-written answers are not."""
+        text = (
+            "In short: AI tools are welcome as an aid, but you must fully understand and be\n"
+            "able to explain every change you submit. Contributions made by autonomous\n"
+            "agents are not accepted.\n\n"
+            "**Do not use AI to generate answers to questions from maintainers.** Using AI to improve "
+            "grammar or clarity is fine.\n"
+        )
+        level, evidence = classify_ai_policy({"CONTRIBUTING.md": text})
+        assert level == "human-in-loop", evidence
+
+    def test_continued_sentence_is_read_whole(self):
+        text = "Contributions made by autonomous\nagents are not accepted.\n"
+        assert classify_ai_policy({"CONTRIBUTING.md": text})[0] == "human-in-loop"
+
+    def test_agents_file_forbidding_prs(self):
+        """AGENTS.md said "Do not open pull requests." with no AI word and read as no policy."""
+        assert classify_ai_policy({"AGENTS.md": "Do not open pull requests.\n"})[0] == "human-in-loop"
+
+
+class TestCiCommands:
+    def test_pull_request_workflow_with_manual_trigger_is_kept(self):
+        ci = "on:\n  pull_request:\n  workflow_dispatch:\njobs:\n  t:\n    steps:\n      - run: pytest -q\n"
+        assert ranked_commands({".github/workflows/ci.yml": ci}) == ["pytest -q"]
+
+    def test_list_form_trigger(self):
+        ci = "on:\n  - push\n  - pull_request\njobs:\n  t:\n    steps:\n      - run: make lint\n"
+        assert ranked_commands({".github/workflows/ci.yml": ci, ".github/workflows/x.yml": "on: push\n"}) == [
+            "make lint"
+        ]
+
+    def test_release_only_workflow_is_still_dropped(self):
+        release = "on:\n  push:\n    tags:\n      - 'v*'\njobs:\n  r:\n    steps:\n      - run: pytest -q\n"
+        assert ranked_commands({".github/workflows/publish.yml": release}) == []
+
+    def test_every_command_of_a_run_block(self):
+        """Only the first line of a multi-line `run: |` was kept, so later checks never reached the profile."""
+        text = "steps:\n  - run: |\n      ruff check .\n      pytest -q \\\n        --cov=src\n      echo done\n"
+        assert workflow_commands(text) == ["ruff check .", "pytest -q --cov=src"]

@@ -64,6 +64,9 @@ CHECK_COMMAND = re.compile(
     r"|\bpre-commit run\b|\bprek run\b"
 )
 RELEASE_WORKFLOW = re.compile(r"(?im)^\s*(?:release|tags?):|^\s*-\s*['\"]?v\*|workflow_dispatch:\s*$")
+PR_TRIGGER = re.compile(
+    r"(?m)^\s*(?:on:.*\bpull_request|pull_request(?:_target)?:|merge_group:|-\s*pull_request(?:_target)?\s*$)"
+)
 TEMPLATE_PATH = re.compile(r"(?i)^(\.github/|docs/)?pull_request_template(\.md|/[^/]+\.md)$")
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 WORKFLOW_SCRIPT_PATH = re.compile(r"^\.github/.+\.(js|cjs|mjs|ts|py|sh)$")
@@ -71,6 +74,7 @@ WORKFLOW_SCRIPT_PATH = re.compile(r"^\.github/.+\.(js|cjs|mjs|ts|py|sh)$")
 AI_TERM = re.compile(
     r"\bAI\b|\bA\.I\.|(?i:\bLLMs?\b|large language model|\bgenerative\b|\bgen-?ai\b|copilot|chatgpt|\bclaude\b|"
     r"\bcodex\b|cod(?:e|ing) agents?|coding assistants?|\bai agents?|autonomous agents?|"
+    r"\bai[- ](?:generated|assisted|written|authored|created|produced|tools?|models?|code|output|content)\b|"
     r"agent-?(?:generated|authored|driven|written)|"
     r"machine[- ]generated|automated agents?|\bagentic\b|\bagents? (?:should|must|may|are|is)\b)"
 )
@@ -80,6 +84,14 @@ BAN = re.compile(
     r"|\b(?:prohibit\w*|forbid\w*|banned|not allowed|not permitted|not accepted)\b"
 )
 AUTONOMOUS = re.compile(r"(?i)\b(?:autonomous\w*|fully automated|without (?:a )?human|unsupervised|unreviewed)\b")
+# A ban on one kind of AI use (unreviewed, not understood, wholly generated, low effort) leaves reviewed use open.
+CONDITIONAL_BAN = re.compile(
+    r"(?i)\byou (?:have not|haven't|did not|didn't|do not|don't|cannot|can't) (?:\w+ ){0,2}"
+    r"(?:review|read|understand|test|check|verif|explain)\w*|\bnot (?:been )?(?:reviewed|understood|tested|verified)\b|"
+    r"\bwithout (?:\w+ ){0,3}(?:review|reviewing|understanding|testing|verification|checking)\b|"
+    r"\b(?:blindly|wholesale|unless)\b|\b(?:fully|entirely|purely|solely|wholly)\b[^.]{0,20}\bgenerated\b|"
+    r"\blow[- ](?:effort|quality)\b|\bslop\b"
+)
 HUMAN_GATE = re.compile(
     r"(?i)\b(?:stop and (?:get|ask for|wait for) (?:explicit )?(?:human|user) (?:approval|review)|"
     r"requires? (?:explicit )?human (?:approval|review)|human (?:approval|review) (?:is )?required|"
@@ -95,6 +107,12 @@ DISCLOSE = re.compile(
 TRAILER_DISCLOSURE = re.compile(r"(?i)\b(?:co-authored-by|assisted-by|generated-by)\b|\btrailer\b|commit message")
 ALLOW = re.compile(
     r"(?i)\b(?:welcome|allowed|permitted|you (?:may|can) use|is fine|fine to use|okay to use|ok to use)\b"
+)
+# What an allowance or a ban is about: writing help only, or the contribution itself.
+NARROW_USE = re.compile(r"(?i)\b(?:grammar|spelling|clarity|wording|phrasing|translat\w*|non-native|proofread\w*)\b")
+CODE_USE = re.compile(
+    r"(?i)\b(?:code|coding|contribut\w*|pull requests?|PRs?|patch\w*|commits?|changes?|implement\w*)\b"
+    r"|\bas (?:an? )?(?:aid|tools?)\b"
 )
 AGENT_PR_BAN = re.compile(
     r"(?i)\b(?:do not|don't|never|must not)\s+(?:prepare|open|submit|create|send|file)\b[^.]{0,80}?"
@@ -145,14 +163,17 @@ def classify_line(window: str, agent_doc: bool = False) -> str | None:
             return None
         if (AUTONOMOUS.search(window) and BAN.search(window)) or HUMAN_GATE.search(window):
             return "human-in-loop"
-        if AGENT_PR_BAN.search(window) and ISSUE_CLASS.search(window):
-            return "issue-restricted"
+        if AGENT_PR_BAN.search(window):
+            # "Do not open pull requests", told to agents: the person opens it, or only some issues are open.
+            return "issue-restricted" if ISSUE_CLASS.search(window) else "human-in-loop"
         return None
     if BAN.search(window):
         if NEWCOMER.search(window):
             return "banned-for-newcomers"
-        if AUTONOMOUS.search(window):
+        if AUTONOMOUS.search(window) or CONDITIONAL_BAN.search(window):
             return "human-in-loop"
+        if REPLY_TERM.search(window) and not CODE_USE.search(window):
+            return "human-in-loop"  # replies in your own words; ai_review_replies carries the rule
         if ISSUE_CLASS.search(window):
             return "issue-restricted"
         return "banned"
@@ -192,22 +213,28 @@ def forbids_ai_replies(docs: dict[str, str]) -> tuple[str, int, str] | None:
 def classify_ai_policy(docs: dict[str, str]) -> tuple[str, list[Evidence]]:
     """Overall level (strictest plausible reading) and the evidence lines behind it.
 
-    A blanket "banned" line is downgraded to "human-in-loop" when the same
-    documents also explicitly allow AI-assisted work, because such documents
-    usually ban unreviewed use rather than all use. The result is still marked
-    for verification.
+    A ban limited to one kind of use (unreviewed, wholly generated, low effort) is
+    "human-in-loop" at the line itself. A blanket "banned" line is downgraded to
+    "human-in-loop" when the documents also allow AI for contributing in general
+    ("AI tools are welcome as an aid"), because such documents ban unreviewed use
+    rather than all use. An allowance for writing help only (grammar, translation)
+    does not lift a ban on code. The result is still marked for verification.
     """
     evidence: list[Evidence] = []
-    allows = False
+    general_allowance = False
     for source, text in docs.items():
         lines = text.splitlines()
         agent_doc = bool(AGENT_DOC.search(source))
         for i, line in enumerate(lines):
             if not line.strip():
                 continue
+            # A line that continues a sentence ("agents are not accepted.") is read with its start.
+            prev = lines[i - 1].strip() if i else ""
+            if prev and not re.search(r"[.!?:]$", prev) and re.match(r"\s*[a-z]", line):
+                line = prev + " " + line.strip()
             window = line + " " + (lines[i + 1] if i + 1 < len(lines) else "")
             if AI_TERM.search(window) and ALLOW.search(window):
-                allows = True
+                general_allowance |= bool(CODE_USE.search(window) or not NARROW_USE.search(window))
             level = classify_line(window, agent_doc)
             if level:
                 direct = classify_line(line, agent_doc) == level
@@ -220,7 +247,7 @@ def classify_ai_policy(docs: dict[str, str]) -> tuple[str, list[Evidence]]:
     if not evidence:
         return "none", []
     levels = {e.level for e in evidence}
-    if "banned" in levels and allows:
+    if "banned" in levels and general_allowance:
         levels.discard("banned")
         levels.add("human-in-loop")
         evidence = [replace(e, level="human-in-loop") if e.level == "banned" else e for e in evidence]
@@ -285,10 +312,11 @@ def detect_open_pr_limit(docs: dict[str, str]) -> tuple[str, tuple | None]:
 
 
 def workflow_commands(text: str) -> list[str]:
-    """First meaningful line of every `run:` step, without shell plumbing or GitHub write actions.
+    """Every meaningful command of every `run:` step, without shell plumbing or GitHub write actions.
 
     A `run: |` block ends at the first line indented no deeper than the `run:` key,
-    so the scan never runs into the next step's `- name:`.
+    so the scan never runs into the next step's `- name:`. Lines continued with a
+    trailing backslash are joined into one command.
     """
     commands = []
     lines = text.splitlines()
@@ -298,15 +326,20 @@ def workflow_commands(text: str) -> list[str]:
             continue
         indent = len(match.group(1))
         value = match.group(2).strip()
+        block = [value]
         if value in {"|", ">", "|-", ">-"}:
             block = []
             for nxt in lines[i + 1 :]:
                 if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
                     break
                 block.append(nxt.strip())
-            value = next((ln for ln in block if ln and not NOISE_COMMAND.match(ln)), "")
-        if value and not NOISE_COMMAND.match(value) and not value.endswith("\\"):
-            commands.append(value[:160])
+        joined: list[str] = []
+        for part in block:
+            if joined and joined[-1].endswith("\\"):
+                joined[-1] = joined[-1][:-1].rstrip() + " " + part
+            else:
+                joined.append(part)
+        commands += [c[:160] for c in joined if c and not NOISE_COMMAND.match(c) and not c.endswith("\\")]
     return commands
 
 
@@ -315,9 +348,12 @@ def ranked_commands(automation: dict[str, str]) -> list[str]:
     then other checks, then the rest. Release-only workflows are dropped."""
     ranked: dict[str, int] = {}
     for path, text in automation.items():
-        if not path.endswith((".yml", ".yaml")) or RELEASE_WORKFLOW.search(text) and not CHECK_COMMAND.search(path):
+        if not path.endswith((".yml", ".yaml")):
             continue
-        on_pr = bool(re.search(r"(?m)^\s*(?:on:.*\bpull_request|pull_request(?:_target)?:)", text))
+        on_pr = bool(PR_TRIGGER.search(text))
+        # A manual `workflow_dispatch` next to `pull_request` does not make a CI workflow release-only.
+        if RELEASE_WORKFLOW.search(text) and not on_pr and not CHECK_COMMAND.search(path):
+            continue
         for command in workflow_commands(text):
             rank = (0 if on_pr else 1) if CHECK_COMMAND.search(command) else 2
             ranked[command] = min(rank, ranked.get(command, rank))
