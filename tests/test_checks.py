@@ -19,8 +19,10 @@ diff --git a/pkg/new.py b/pkg/new.py
 --- /dev/null
 +++ b/pkg/new.py
 @@ -0,0 +1,1 @@
-+TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-"""
++TOKEN = "FAKE_TOKEN"
+""".replace(
+    "FAKE_TOKEN", "ghp" + "_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+)  # built at runtime: no token-shaped literal in the repo
 
 
 class TestDiffCheck:
