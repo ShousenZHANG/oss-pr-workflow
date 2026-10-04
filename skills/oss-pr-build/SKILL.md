@@ -18,6 +18,7 @@ Scripts are in `../oss-pr/scripts/` from this skill's directory; call them by ab
 ```bash
 gh repo fork owner/repo --clone=false            # once, when the user has no fork yet
 git -C <clone> fetch upstream
+git -C <clone> remote set-head upstream --auto                   # record the remote's default branch
 git -C <clone> symbolic-ref --short refs/remotes/upstream/HEAD   # the default branch: main, master, develop...
 git -C <clone> worktree add ../<repo>-<slug> -b <type>/<slug> upstream/<default-branch>
 ```
@@ -37,6 +38,9 @@ A required tool may be missing (Go, yarn, a CI-only container) or the platform m
 3. Ask the user to choose: install the tool, or accept that CI will be the first run of those checks (then watch CI closely after opening). Without that choice the exit check below is not met.
 
 ## 2. Implement
+
+**Advise-only mode** when the profile says `code_by: user` (the repository wants contributors to write the code themselves): do not write the patch. Explain the defect, point to the lines, describe the change and the test in words, then review what the user writes, run every check on it, and do the rest of this phase (tests, CI reproduction, review) on their code. The user's own patch is what gets submitted.
+
 
 - Copy the merged recipe from recon: same file layout, naming, error style, test style, size. The profile's `merged_pr_*_p90` gives the size envelope.
 - Smallest change that fixes the problem. No drive-by refactors, formatting or "improvements".
@@ -120,7 +124,8 @@ Reviewers report in this shape; write it to `review.json` in the worktree (not c
   "tests": [{"name": "test_empty_messages", "fails_without_fix": true,
              "command": "pytest tests/test_a.py -k empty_messages",
              "without_fix_log": "runs/without_fix.txt", "with_fix_log": "runs/with_fix.txt"}],
-  "not_run": [{"check": "yarn typecheck", "reason": "yarn not installed"}],
+  "not_run": [{"check": "yarn typecheck", "reason": "yarn not installed",
+               "user_choice": "accept CI as the first run"}],
   "findings": [{"path": "src/a.py", "start_line": 40, "end_line": 42, "severity": "high",
                 "category": "behavior-change", "evidence": "old code returned 400 here",
                 "resolution": "fixed"}]

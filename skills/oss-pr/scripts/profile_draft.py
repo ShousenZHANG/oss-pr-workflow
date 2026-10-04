@@ -29,7 +29,7 @@ from datetime import date
 from pathlib import Path
 
 from _config import AI_POLICY_LEVELS, cache_dir, data_dir, profile_name
-from _gh import EXTERNAL_ASSOCIATIONS, check_api_budget, gh_json, is_bot, raw_file, use_utf8_stdout
+from _gh import EXTERNAL_ASSOCIATIONS, check_api_budget, gh_json, is_bot, raw_file, run_main, use_utf8_stdout
 from base_rate import mergers
 
 DOC_NAME = re.compile(
@@ -43,16 +43,24 @@ CONTRIB_DOC_DIR = re.compile(
 VENDORED = re.compile(r"(?i)(^|/)(vendor|third_party|third-party|node_modules|external)/")
 POLICY_LINK = re.compile(r"\[([^\]]+)\]\((https://github\.com/[^)\s]+|[^)\s:]+\.(?:md|rst))\)")
 POLICY_REF_LINK = re.compile(r"(?m)^\s*\[([^\]]+)\]:\s*(https://github\.com/\S+|[^\s:]+\.(?:md|rst))\s*$")
+DOCS_LINK = re.compile(r"\[([^\]]+)\]\((https?://(?!github\.com)[^)\s]+)\)")
+DOCS_REF_LINK = re.compile(r"(?m)^\s*\[([^\]]+)\]:\s*(https?://(?!github\.com)\S+)\s*$")
 POLICY_LINK_TOPIC = re.compile(r"(?i)\b(?:ai|policy|contribut\w*|pull request|guidelines?)\b")
 DCO_TEXT = re.compile(
     r"(?i)\bDCO\b|Developer.?s? Certificate of Origin|Signed-off-by|--signoff|\bsigned[- ]off\b|\bsign[- ]off\b"
+)
+CODE_BY_USER = re.compile(
+    r"(?i)write the (?:actual )?code yourself|code (?:must|should) be written by (?:you|a human|the contributor)|"
+    r"do not (?:submit|send|contribute) (?:ai|llm)[- ]generated code|(?:ai|llm)[- ]generated code (?:is|will) not"
 )
 PR_TEXT_TERM = re.compile(
     r"(?i)\b(?:description|communication|comments?|issues?|pr text|pull request text|written|messages?)\b"
 )
 CONTRIB_DOC_TOPIC = re.compile(
-    r"(?i)(pull.?request|\bai\b|ai[_-]|gen.?ai|open.?pull|limit|commit|review|issue|guideline|readme|index)"
+    r"(?i)(pull.?request|\bai\b|ai[_-]|gen.?ai|open.?pull|limit|commit|review|issue|guide|readme|index)"
 )
+CHECK_COMMAND = re.compile(r"(?i)\b(?:lint|test|check|typecheck|type-check|format|fmt|precheck|vet|mypy|ruff|prettier)")
+RELEASE_WORKFLOW = re.compile(r"(?im)^\s*(?:release|tags?):|^\s*-\s*['\"]?v\*|workflow_dispatch:\s*$")
 TEMPLATE_PATH = re.compile(r"(?i)^(\.github/|docs/)?pull_request_template(\.md|/[^/]+\.md)$")
 WORKFLOW_PATH = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 WORKFLOW_SCRIPT_PATH = re.compile(r"^\.github/.+\.(js|cjs|mjs|ts|py|sh)$")
@@ -256,20 +264,40 @@ def detect_open_pr_limit(docs: dict[str, str]) -> tuple[str, tuple | None]:
 
 
 def workflow_commands(text: str) -> list[str]:
-    """First meaningful line of every `run:` step, without shell plumbing or GitHub write actions."""
+    """First meaningful line of every `run:` step, without shell plumbing or GitHub write actions.
+
+    A `run: |` block ends at the first line indented no deeper than the `run:` key,
+    so the scan never runs into the next step's `- name:`.
+    """
     commands = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        match = re.match(r"^\s*-?\s*run:\s*(.*)$", line)
+        match = re.match(r"^(\s*)(?:-\s*)?run:\s*(.*)$", line)
         if not match:
             continue
-        value = match.group(1).strip()
+        indent = len(match.group(1))
+        value = match.group(2).strip()
         if value in {"|", ">", "|-", ">-"}:
-            block = [ln.strip() for ln in lines[i + 1 : i + 12]]
+            block = []
+            for nxt in lines[i + 1 :]:
+                if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                    break
+                block.append(nxt.strip())
             value = next((ln for ln in block if ln and not NOISE_COMMAND.match(ln)), "")
         if value and not NOISE_COMMAND.match(value) and not value.endswith("\\"):
             commands.append(value[:160])
     return commands
+
+
+def ranked_commands(automation: dict[str, str]) -> list[str]:
+    """CI commands worth reproducing locally: checks (lint, test, typecheck, ...) first, release workflows dropped."""
+    commands: list[str] = []
+    for path, text in automation.items():
+        if not path.endswith((".yml", ".yaml")) or RELEASE_WORKFLOW.search(text) and not CHECK_COMMAND.search(path):
+            continue
+        commands.extend(workflow_commands(text))
+    unique = list(dict.fromkeys(commands))
+    return sorted(unique, key=lambda c: 0 if CHECK_COMMAND.search(c) else 1)
 
 
 def title_style(titles: list[str], docs: dict[str, str]) -> str:
@@ -334,22 +362,33 @@ def disclosure_lines(bodies: list[str]) -> list[str]:
     return seen[:6]
 
 
-def merged_sample(repo: str, size: int, maintainers: set[str]) -> list[dict]:
-    """Recently merged PRs from outside, non-bot authors who did not merge PRs themselves, with size stats."""
-    pulls = gh_json(["api", f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100"]) or []
-    picked = []
-    for pr in pulls:
-        user = pr.get("user") or {}
-        login = user.get("login", "")
-        if (
-            pr.get("merged_at")
-            and pr.get("author_association") in EXTERNAL_ASSOCIATIONS
-            and not is_bot(login, user.get("type", ""))
-            and login not in maintainers
-        ):
-            picked.append(pr)
-        if len(picked) >= size:
+def is_sample_candidate(pr: dict, maintainers: set[str]) -> bool:
+    """Merged, by an outside non-bot author who does not merge PRs, and not a backport."""
+    user = pr.get("user") or {}
+    login = user.get("login", "")
+    labels = " ".join(label.get("name", "") for label in pr.get("labels", []))
+    return bool(
+        pr.get("merged_at")
+        and pr.get("author_association") in EXTERNAL_ASSOCIATIONS
+        and not is_bot(login, user.get("type", ""))
+        and login not in maintainers
+        and not re.search(r"(?i)backport", pr.get("title", "") + " " + labels)
+    )
+
+
+def merged_sample(repo: str, size: int, maintainers: set[str], max_pages: int = 5) -> list[dict]:
+    """Recently merged PRs from outside contributors, with size stats; pages until `size` are found."""
+    picked: list[dict] = []
+    for page in range(1, max_pages + 1):
+        pulls = gh_json(
+            ["api", f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}"]
+        )
+        if not pulls:
             break
+        picked.extend(pr for pr in pulls if is_sample_candidate(pr, maintainers))
+        if len(picked) >= size or len(pulls) < 100:
+            break
+    picked = picked[:size]
     detailed = []
     for pr in picked:
         full = gh_json(["api", f"repos/{repo}/pulls/{pr['number']}"])
@@ -400,18 +439,20 @@ def fetch_docs(repo: str, branch: str, tree: list[str]) -> tuple[dict[str, str],
     docs = resolve_symlink_docs(repo, branch, fetch_many(repo, branch, list(dict.fromkeys(doc_paths))[:40]), set(tree))
     template_texts = fetch_many(repo, branch, templates)
     automation = fetch_many(repo, branch, workflow_paths + script_paths)
-    linked = fetch_linked_policies(repo, branch, {**docs, **template_texts}, set(docs) | set(template_texts))
+    linked = fetch_linked_policies(repo, branch, {**docs, **template_texts}, set(docs) | set(template_texts), set(tree))
     return {**docs, **linked}, template_texts, automation
 
 
-def policy_links(source: str, text: str) -> list[tuple[str, str]]:
+def policy_links(source: str, text: str, tree: frozenset[str] | set[str] = frozenset()) -> list[tuple[str, str]]:
     """(repo, path) of documents a template or guide links to under an AI / policy / contributing title.
 
     The governing AI policy sometimes lives in another repository (an org-wide
     community repo), reachable only through such a link.
     """
     found = []
-    for title, target in POLICY_LINK.findall(text) + POLICY_REF_LINK.findall(text):
+    links = POLICY_LINK.findall(text) + POLICY_REF_LINK.findall(text)
+    links += DOCS_LINK.findall(text) + DOCS_REF_LINK.findall(text)
+    for title, target in links:
         if not POLICY_LINK_TOPIC.search(title + " " + target):
             continue
         blob = re.match(r"https://github\.com/([^/]+/[^/]+)/blob/([^/]+)/(.+?)(?:#.*)?$", target)
@@ -421,13 +462,34 @@ def policy_links(source: str, text: str) -> list[tuple[str, str]]:
             base = source.rsplit("/", 1)[0] + "/" if "/" in source else ""
             path = re.sub(r"[^/]+/\.\./", "", base + target.split("#")[0]).lstrip("./")
             found.append(("", path))
-    return found
+        elif "github.com" not in target:
+            mapped = docs_site_path(target, tree)
+            if mapped:
+                found.append(("", mapped))
+    return list(dict.fromkeys(found))
 
 
-def fetch_linked_policies(repo: str, branch: str, docs: dict[str, str], seen: set[str]) -> dict[str, str]:
+def docs_site_path(url: str, tree: frozenset[str] | set[str]) -> str | None:
+    """Map a documentation-site URL (docs.cilium.io/en/stable/contributing/development/contributing_guide/)
+    to the source file in the repository (Documentation/contributing/development/contributing_guide.rst)."""
+    segments = [s for s in re.sub(r"[?#].*$", "", url).split("/")[3:] if s]
+    segments = [s for s in segments if not re.fullmatch(r"(?i)en|stable|latest|main|master|v?\d+(?:\.\d+)*", s)]
+    if not segments:
+        return None
+    tail = "/".join(segments[-2:]).removesuffix(".html")
+    for path in sorted(tree):
+        stem = re.sub(r"\.(?:md|mdx|rst|txt)$", "", path)
+        if stem.endswith(tail) and path != stem:
+            return path
+    return None
+
+
+def fetch_linked_policies(
+    repo: str, branch: str, docs: dict[str, str], seen: set[str], tree: frozenset[str] | set[str] = frozenset()
+) -> dict[str, str]:
     linked: dict[str, str] = {}
     for source, text in docs.items():
-        for target_repo, spec in policy_links(source.split(" -> ")[0], text):
+        for target_repo, spec in policy_links(source.split(" -> ")[0], text, tree):
             if len(linked) >= 8:
                 return linked
             if target_repo:
@@ -540,6 +602,7 @@ def main() -> None:
     else:
         release_note = "none found"
     text_hit = forbids_ai_text(corpus)
+    code_hit = first_match(CODE_BY_USER.pattern, corpus)
     issue_req = first_match(
         r"link(?:ed)? (?:to )?an? (?:existing |related )?issue|must (?:have|reference|link|include|close) an? "
         r"(?:related |open )?issue|associated issue|open an issue (?:first|before)|issue first|"
@@ -554,9 +617,13 @@ def main() -> None:
     )
     ping_number = re.search(r"(\d+)\s*hours?", ping_hit[2], re.IGNORECASE) if ping_hit else None
     ping_hours = ping_number.group(1) if ping_number else "none found"
-    decisive = next((e for e in evidence if e.level == level and e.direct), None) or next(
-        (e for e in evidence if e.level == level), None
+    same_level = [e for e in evidence if e.level == level]
+    decisive = (
+        next((e for e in same_level if e.direct and not e.text.rstrip().endswith(":")), None)
+        or next((e for e in same_level if e.direct), None)
+        or next(iter(same_level), None)
     )
+    small_sample = len(sample) < 10
 
     facts = {
         "checked": f"{date.today().isoformat()} (auto, verify)",
@@ -574,16 +641,17 @@ def main() -> None:
         "ascii_only": f"{'yes' if ascii_hit else 'no'} (auto, verify)",
         "ai_review_replies": f"{'own-words-only' if replies_hit or text_hit else 'allowed'} (auto, verify)",
         "pr_text_by": f"{'user' if text_hit else 'agent draft, user approves'} (auto, verify)",
+        "code_by": f"{'user' if code_hit else 'agent, user reviews every line'} (auto, verify)",
         "release_note": f"{release_note} (auto, verify)",
         "issue_required": f"{'yes' if issue_req else 'no'} (auto, verify)",
         "internal_labels": f"{cite(internal_hit) if internal_hit else 'none found'} (auto, verify)",
         "stale_close": f"{stale_days(automation)} (auto, verify)",
         "min_ping_hours": f"{ping_hours} (auto, verify)",
-        "merged_pr_files_p90": str(percentile(files, 0.9)),
-        "merged_pr_lines_p90": str(percentile(lines, 0.9)),
+        "merged_pr_files_p90": f"{percentile(files, 0.9)} (n={len(sample)}{', too few to trust' * small_sample})",
+        "merged_pr_lines_p90": f"{percentile(lines, 0.9)} (n={len(sample)}{', too few to trust' * small_sample})",
     }
 
-    commands = list(dict.fromkeys(c for text in automation.values() for c in workflow_commands(text)))
+    commands = ranked_commands(automation)
     scoped = scoped_agent_files(tree)
     bot_rules = all_matches(BOT_RULE, automation, 30)
     sections = {
@@ -596,6 +664,7 @@ def main() -> None:
             f"- ASCII rule: {cite(ascii_hit)}",
             f"- AI-written replies to maintainers: {cite(replies_hit)}",
             f"- AI-written PR text or communication: {cite(text_hit)}",
+            f"- code must be written by the contributor: {cite(code_hit)}",
             f"- response time: {cite(ping_hit)}",
         ],
         "Bot rules (from workflows and their scripts)": [
@@ -606,11 +675,15 @@ def main() -> None:
         "Path rules": ["| glob | rule |", "|------|------|"]
         + [f"| `{p.rsplit('/', 1)[0]}/**` | read `{p}` before changing files here |" for p in scoped],
         "Local checks that match CI": [
-            "Commands CI runs (first line of each step, shell plumbing removed). Mark the ones the documented",
-            "local lint command does not cover, and drop release or deployment steps:",
+            "Commands CI runs (first line of each step; check-like commands first; release workflows and shell",
+            "plumbing removed). Mark the ones the documented local lint command does not cover:",
             "",
         ]
-        + [f"- `{c}`" for c in commands[:50]],
+        + [f"- `{c}`" for c in commands[:60]]
+        + (
+            [f"- ... {len(commands) - 60} more not shown; search the workflows if a check is missing"]
+            * (len(commands) > 60)
+        ),
         "Merged sample": [
             f"- {len(sample)} PRs from outside contributors who do not merge PRs; files median "
             f"{statistics.median(files) if files else 0}, p90 {percentile(files, 0.9)}; lines median "
@@ -649,4 +722,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

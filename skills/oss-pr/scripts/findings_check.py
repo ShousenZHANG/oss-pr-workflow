@@ -58,8 +58,13 @@ CATEGORIES = {
     "other",
 }
 PROTECTED = {"behavior-change", "compatibility", "concurrency", "unused-parameter", "security"}
-FAIL_MARKER = re.compile(r"(?i)\b(?:fail(?:ed|ure|s)?|error|traceback|assert\w*|panic(?:ked)?|exception)\b")
-FAILED_COUNT = re.compile(r"(?im)\b[1-9]\d* (?:failed|failures?|errors?)\b|^FAILED\b|^--- FAIL|^not ok\b")
+# A user-approved test waiver can stand in for a test on these, never on security or concurrency findings.
+WAIVABLE = {"behavior-change", "compatibility", "unused-parameter"}
+# A real failure, not a summary that merely contains the word ("fail 0", "0 failed", "test_error_path").
+FAILED_COUNT = re.compile(
+    r"(?im)\b[1-9]\d* (?:failed|failing|failures?|errors?)\b|\bfail(?:ed|ures?)?:? [1-9]\d*\b|"
+    r"^\s*(?:FAILED\b|FAIL\b|--- FAIL|not ok\b|Traceback \(most recent call last\)|panic:|AssertionError|✕|×)"
+)
 PASS_MARKER = re.compile(r"(?i)\b(?:passed|pass|ok|success(?:ful)?)\b")
 
 
@@ -120,8 +125,13 @@ def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
                 )
             )
             continue
-        if not FAIL_MARKER.search(without_log):
-            out.append(Finding("FAIL", f"test {name}: without_fix_log shows no failure"))
+        if without_log.strip() == with_log.strip():
+            out.append(Finding("FAIL", f"test {name}: the two logs are identical; they cannot be two different runs"))
+            continue
+        if not FAILED_COUNT.search(without_log):
+            out.append(
+                Finding("FAIL", f"test {name}: without_fix_log shows no failure (a zero failure count is a pass)")
+            )
             continue
         if FAILED_COUNT.search(with_log) or not PASS_MARKER.search(with_log):
             out.append(Finding("FAIL", f"test {name}: with_fix_log does not show a clean pass"))
@@ -132,6 +142,17 @@ def check_tests(tests: list[dict], read_text=read_file) -> list[Finding]:
     if not proven:
         out.append(Finding("FAIL", "no test is proven to fail without the fix and pass with it"))
     return out
+
+
+def merge_near(spans: list[tuple[int, int]], gap: int = 3) -> list[tuple[int, int]]:
+    """Join hunks closer than `gap` lines, so a finding spanning two adjacent hunks counts as inside them."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1] + gap:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def waiver_ok(waiver: dict | None) -> bool:
@@ -174,6 +195,16 @@ def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str
     elif waiver and not waiver_ok(waiver):
         test_results.append(Finding("FAIL", "test_waiver needs precedent, ci_coverage and approved_by_user: true"))
     out += test_results
+    for entry in report.get("not_run", []):
+        if not str(entry.get("user_choice", "")).strip():
+            out.append(
+                Finding(
+                    "FAIL",
+                    f"not_run {entry.get('check', '?')!r}: record the user's choice (install the tool, or accept CI "
+                    "as the first run) in user_choice",
+                )
+            )
+    merged_ranges = {path: merge_near(spans) for path, spans in ranges.items()}
 
     for i, item in enumerate(report.get("findings", []), 1):
         tag = f"finding {i} ({item.get('path')}:{item.get('start_line')})"
@@ -185,7 +216,7 @@ def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str
         count = line_counts.get(path, 0)
         if not isinstance(start, int) or not isinstance(end, int) or not 1 <= start <= end <= count:
             out.append(Finding("FAIL", f"{tag}: line numbers do not exist in the new file"))
-        elif not any(a - 3 <= start and end <= b + 3 for a, b in ranges.get(path, [])):
+        elif not any(a - 3 <= start and end <= b + 3 for a, b in merged_ranges.get(path, [])):
             out.append(Finding("WARN", f"{tag}: lines are outside the changed hunks"))
         if item.get("severity") not in SEVERITIES:
             out.append(Finding("FAIL", f"{tag}: severity must be one of {sorted(SEVERITIES)}"))
@@ -199,7 +230,7 @@ def validate(report: dict, files: list[str], ranges: dict, line_counts: dict[str
             proof = resolution[len("dismissed:") :].strip()
             if not proof:
                 out.append(Finding("FAIL", f"{tag}: dismissed without proof"))
-            elif category in PROTECTED and "test:" not in proof and not waiver_ok(waiver):
+            elif category in PROTECTED and "test:" not in proof and not (waiver_ok(waiver) and category in WAIVABLE):
                 out.append(Finding("FAIL", f"{tag}: {category} can only be dismissed with a test ('test: <name>')"))
     out.append(Finding("INFO", f"coverage {reviewed}/{len(files)} files reviewed"))
     return out

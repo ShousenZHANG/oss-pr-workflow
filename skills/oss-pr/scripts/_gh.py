@@ -35,17 +35,18 @@ def use_utf8_stdout() -> None:
 
 
 def gh(args: list[str]) -> str | None:
-    """Run `gh <args>` and return stdout, retrying transient failures. None means every attempt failed."""
+    """Run `gh <args>` and return stdout, retrying transient failures with exponential backoff
+    (4, 8, 16, 32 s). None means every attempt failed; callers must not read None as "empty"."""
     last_error = ""
-    for attempt in range(RETRIES):
+    for attempt in range(RETRIES + 1):
         result = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode == 0:
             return result.stdout
         last_error = result.stderr.strip()
-        if "Not Found" in last_error or "HTTP 404" in last_error:
+        if "Not Found" in last_error or "HTTP 404" in last_error or "HTTP 401" in last_error:
             break
-        if attempt < RETRIES - 1:
-            time.sleep(RETRY_DELAY_SECONDS)
+        if attempt < RETRIES:
+            time.sleep(RETRY_DELAY_SECONDS * 2**attempt)
     print(f"gh {' '.join(args[:3])} ... failed: {last_error[:200]}", file=sys.stderr)
     return None
 
@@ -64,10 +65,20 @@ def gh_api_pages(path: str, max_pages: int = 100):
     for page in range(1, max_pages + 1):
         items = gh_json(["api", f"{path}{separator}per_page=100&page={page}"])
         if items is None:
-            raise RuntimeError(f"failed to fetch page {page} of {path}")
+            raise RuntimeError(f"failed to fetch page {page} of {path} after retries; check the network and rerun")
         yield items
         if len(items) < 100:
             return
+
+
+def run_main(main) -> None:
+    """Entry point wrapper: a network failure after all retries ends with one clear line, not a traceback."""
+    try:
+        main()
+    except RuntimeError as error:
+        sys.exit(f"ERROR: {error}")
+    except KeyboardInterrupt:
+        sys.exit("interrupted")
 
 
 def gh_graphql(query: str, **variables: str):

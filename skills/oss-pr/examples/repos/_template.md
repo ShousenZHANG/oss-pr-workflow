@@ -10,6 +10,7 @@ Profile layout. The `## Facts` block is machine-read: keep `- key: value` lines 
 - disclosure_regex: regex the PR description must match, e.g. (?m)^From \S+
 - disclosure_location: body | commit-trailer | body and commit-trailer
 - pr_text_by: agent draft, user approves | user (the repo forbids AI-written PR text)
+- code_by: agent, user reviews every line | user (the repo wants contributors to write the code)
 - link_style: e.g. Fixes #N for single issues; Refs #N under umbrella issues
 - title_style: conventional | imperative | free-form
 - open_pr_limit: number or none

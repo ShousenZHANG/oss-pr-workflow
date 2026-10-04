@@ -21,7 +21,7 @@ from datetime import date
 from pathlib import Path
 
 from _config import data_dir
-from _gh import gh_json, use_utf8_stdout
+from _gh import gh_json, run_main, use_utf8_stdout
 
 OUTCOMES = {"open", "merged", "closed-process", "closed-merits", "withdrawn", ""}
 DECIDED = {"merged", "closed-process", "closed-merits"}
@@ -190,4 +190,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

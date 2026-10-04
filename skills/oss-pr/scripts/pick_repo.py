@@ -18,7 +18,7 @@ import argparse
 import sys
 from collections import Counter
 
-from _gh import check_api_budget, days_ago, gh_json, parse_iso, use_utf8_stdout
+from _gh import check_api_budget, days_ago, gh_json, parse_iso, run_main, use_utf8_stdout
 from base_rate import collect_closed, external_only, mergers
 from profile_draft import classify_ai_policy, fetch_docs
 
@@ -100,4 +100,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

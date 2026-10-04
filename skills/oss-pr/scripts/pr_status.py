@@ -13,7 +13,7 @@ import argparse
 from collections import Counter
 from datetime import timedelta
 
-from _gh import days_ago, gh_json, is_bot, parse_iso, truncation_warning, use_utf8_stdout
+from _gh import days_ago, gh_json, is_bot, parse_iso, run_main, truncation_warning, use_utf8_stdout
 
 VIEW_FIELDS = (
     "title,state,isDraft,mergeable,reviewDecision,updatedAt,labels,assignees,reviews,comments,statusCheckRollup"
@@ -135,4 +135,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

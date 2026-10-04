@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import Counter
 
-from _gh import gh, gh_json, use_utf8_stdout
+from _gh import gh, gh_json, run_main, use_utf8_stdout
 
 TIMELINE_JQ = (
     '.[] | select(.event == "cross-referenced") | select(.source.issue.pull_request != null)'
@@ -95,7 +96,11 @@ def main() -> None:
     args = parser.parse_args()
 
     pattern = re.compile(args.diff_match, re.MULTILINE) if args.diff_match else None
-    issue = gh_json(["api", f"repos/{args.repo}/issues/{args.issue}"]) or {}
+    issue = gh_json(["api", f"repos/{args.repo}/issues/{args.issue}"])
+    if not issue:
+        sys.exit(f"ERROR: {args.repo}#{args.issue} not found (or not readable); nothing to check")
+    if issue.get("pull_request"):
+        print(f"note: #{args.issue} is a pull request, not an issue")
     labels = ", ".join(label["name"] for label in issue.get("labels", []))
     print(f"{args.repo}#{args.issue} [{(issue.get('state') or '?').upper()}] {issue.get('title', '')[:90]}")
     if labels:
@@ -152,4 +157,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

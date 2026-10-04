@@ -25,7 +25,7 @@ Scripts are in the `oss-pr` skill next to this one: `../oss-pr/scripts/` from th
    | `banned` | "we do not accept AI-generated contributions" | **Stop.** Tell the user; do not continue in this repo. |
    | `banned-for-newcomers` | "first-time contributors must not use code agents"; or maintainers close newcomers' AI-written patches in practice (step 2) | The user's status is printed by `base_rate.py`. NEWCOMER: stop. RETURNING: continue as `disclosure` or `human-in-loop`. |
    | `issue-restricted` | "only issues labelled `help wanted` with acceptance criteria" | Continue; write the condition into the profile; scouting may only offer issues that meet it. |
-   | `human-in-loop` | "autonomous agents are not allowed; a human must review every change"; "write the code yourself, AI may assist" | Continue; before submission the user must confirm they read (and, where required, wrote) every changed line, and the PR says so truthfully. |
+   | `human-in-loop` | "autonomous agents are not allowed; a human must review every change"; "write the code yourself, AI may assist" (also set `code_by: user`) | Continue; before submission the user must confirm they read (and, where required, wrote) every changed line, and the PR says so truthfully. |
    | `disclosure` | "state in the PR description if AI tools were used" | Continue; copy the exact required wording. |
    | `none` | no rule found | Continue; disclose briefly anyway. |
 
@@ -35,6 +35,7 @@ Scripts are in the `oss-pr` skill next to this one: `../oss-pr/scripts/` from th
    - `disclosure_regex`: a regex that matches the required disclosure line, built from the template and the disclosure lines seen in merged PRs (for example `(?m)^From \S+`, `Generated-by:`, `AIL:\s*\d`). Write `none required` when the repository asks for nothing. The draft's `FILL IN` placeholder makes `pr_body_check.py` fail until this is done.
    - `disclosure_location`: `body`, `commit-trailer`, or both. Some repositories want a `Co-Authored-By` trailer instead of a PR-body line.
    - `pr_text_by`: `user` when the repository forbids AI-written PR descriptions or communication; then phase 5 hands the user facts and a skeleton instead of a finished text.
+   - `code_by`: `user` when the repository wants contributors to write the code themselves ("AI may help you understand, but write the actual code yourself"); then phase 4 runs in advise-only mode.
    - `ai_review_replies`: `own-words-only` when the repo forbids AI-written answers to maintainers.
    - `link_style`: what merged PRs actually write. On umbrella issues that must stay open, a closing keyword (`Fixes #N`) can close the issue or get the PR deduplicated; check which keyword merged PRs under umbrellas used. Some repositories also want the reference in the commit message.
    - Conditions for `issue-restricted` repos, label requirements (e.g. an issue must carry `ready`), and `internal_labels` that mark issues outsiders should not take.
@@ -47,7 +48,7 @@ Scripts are in the `oss-pr` skill next to this one: `../oss-pr/scripts/` from th
 
 Copy the layout of `../oss-pr/examples/repos/_template.md`. The `## Facts` block is read by the scripts (`- key: value` lines), so keep its keys:
 
-`checked, ai_policy, ai_policy_quote, disclosure_regex, disclosure_location, pr_text_by, link_style, title_style, open_pr_limit, dco, cla, signed_commits, ascii_only, ai_review_replies, release_note, issue_required, internal_labels, stale_close, min_ping_hours, merged_pr_files_p90, merged_pr_lines_p90`
+`checked, ai_policy, ai_policy_quote, disclosure_regex, disclosure_location, pr_text_by, code_by, link_style, title_style, open_pr_limit, dco, cla, signed_commits, ascii_only, ai_review_replies, release_note, issue_required, internal_labels, stale_close, min_ping_hours, merged_pr_files_p90, merged_pr_lines_p90`
 
 ## Exit check
 

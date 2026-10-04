@@ -12,6 +12,7 @@ Sources: [PR template](https://github.com/apache/airflow/blob/main/.github/PULL_
 - disclosure_regex: (?m)^Generated-by: \S+
 - disclosure_location: body
 - pr_text_by: agent draft, user approves
+- code_by: agent, user reviews every line
 - link_style: `closes: #N` or `related: #N`
 - title_style: imperative, no conventional prefix (`Fix clearing with ...`, not `fix: ...`)
 - open_pr_limit: 5

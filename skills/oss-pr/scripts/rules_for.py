@@ -12,6 +12,7 @@ Files that share a rule are grouped so each rule is read once.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,9 @@ from collections import defaultdict
 
 from _config import glob_match, load_profile
 from _gh import default_base, run_git_or_exit, use_utf8_stdout
+
+# Files this workflow writes into the worktree; they are never part of the contribution.
+WORKFLOW_ARTIFACT = re.compile(r"(^|/)(review\.json|runs/|pr_body[^/]*\.md|pr_title\.txt|evidence[^/]*\.txt)")
 
 
 def group_rules(paths: list[str], rules: list[tuple[str, str]]) -> tuple[dict[str, list[str]], list[str]]:
@@ -38,8 +42,12 @@ def changed_files(base: str) -> list[str]:
     """Files changed since the branch left `base`: committed, staged, unstaged, and new untracked files."""
     merge_base = run_git_or_exit(["merge-base", base, "HEAD"]).strip()
     tracked = run_git_or_exit(["diff", "--name-only", merge_base])
-    untracked = run_git_or_exit(["ls-files", "--others", "--exclude-standard"])
-    return list(dict.fromkeys(line for line in (tracked + untracked).splitlines() if line.strip()))
+    untracked = [
+        line
+        for line in run_git_or_exit(["ls-files", "--others", "--exclude-standard"]).splitlines()
+        if line.strip() and not WORKFLOW_ARTIFACT.search(line)
+    ]
+    return list(dict.fromkeys([*(line for line in tracked.splitlines() if line.strip()), *untracked]))
 
 
 def ocr_rules(paths: list[str]) -> str | None:

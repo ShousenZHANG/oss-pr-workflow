@@ -109,7 +109,7 @@ python contention_map.py <owner>/<repo> --check src/file.py --check tests/test_f
 ### L3 - Hunk level
 
 ```bash
-python contention_map.py <owner>/<repo> --check src/file.py --line 120 --line 245
+python contention_map.py <owner>/<repo> --check src/file.py:120,245 --check tests/test_file.py
 ```
 
 | Distance from your edit (base-branch lines) | Verdict | Action |

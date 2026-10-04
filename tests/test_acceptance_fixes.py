@@ -234,3 +234,147 @@ def test_workflow_scripts_next_to_workflows_are_read():
     workflows, scripts = automation_paths(tree)
     assert workflows == [".github/workflows/ci.yml"]
     assert scripts == [".github/workflows/auto-close-pr.js", ".github/scripts/x.py"]
+
+
+class TestRoundTwoFindings:
+    """Defects found by the second acceptance round (cilium, grafana, mlflow)."""
+
+    def test_pacing_enforces_the_ai_gate(self):
+        from pacing import ai_gate
+
+        assert ai_gate("banned", None)[0] == "STOP"
+        assert ai_gate("banned-for-newcomers (auto, verify)", 0)[0] == "STOP"
+        assert ai_gate("banned-for-newcomers", None)[0] == "STOP"
+        assert ai_gate("banned-for-newcomers", 3) is None
+        assert ai_gate("disclosure", 0) is None
+
+    def test_pacing_fails_closed_when_the_search_fails(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        import pacing
+
+        monkeypatch.setattr(pacing, "gh_json", lambda args: None)
+        with pytest.raises(RuntimeError):
+            pacing.my_prs("a/b", "me", timedelta(days=7), datetime.now(timezone.utc))
+
+    def test_identical_or_zero_failure_logs_are_not_proof(self):
+        from findings_check import check_tests
+
+        test = {"name": "test_x", "fails_without_fix": True, "without_fix_log": "a", "with_fix_log": "b"}
+        same = {"a": "test_x passed\n1 passed", "b": "test_x passed\n1 passed"}
+        assert any("identical" in f.message for f in check_tests([test], same.get))
+        zero = {"a": "test_x\nℹ fail 0\nℹ pass 1", "b": "test_x ok\n1 passed"}
+        assert any("shows no failure" in f.message for f in check_tests([test], zero.get))
+        real = {"a": "FAIL test_x\nexpected 1, got 2\n1 failed", "b": "test_x ok\n1 passed"}
+        assert [f.level for f in check_tests([test], real.get)] == []
+
+    def test_not_run_needs_the_users_choice_and_waiver_never_covers_security(self):
+        from findings_check import validate
+
+        base = {
+            "coverage": [{"path": "a.go", "status": "reviewed"}],
+            "tests": [],
+            "test_waiver": {"precedent": "#1", "ci_coverage": "e2e", "approved_by_user": True},
+            "not_run": [{"check": "go test", "reason": "no Go"}],
+            "findings": [
+                {
+                    "path": "a.go",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "severity": "high",
+                    "category": "security",
+                    "evidence": "x",
+                    "resolution": "dismissed: input is trusted",
+                }
+            ],
+        }
+        messages = [r.message for r in validate(base, ["a.go"], {"a.go": [(1, 1)]}, {"a.go": 5}) if r.level == "FAIL"]
+        assert any("user_choice" in m for m in messages)
+        assert any("security can only be dismissed with a test" in m for m in messages)
+
+    def test_finding_spanning_adjacent_hunks_is_inside(self):
+        from findings_check import merge_near
+
+        assert merge_near([(59, 61), (64, 66)]) == [(59, 66)]
+        assert merge_near([(1, 2), (20, 21)]) == [(1, 2), (20, 21)]
+
+    def test_reference_link_labels_are_not_instructions(self):
+        template = (
+            "- [ ] Read [Submitting a pull request] first\n\nSee [Submitting a pull request].\n\n"
+            "[Submitting a pull request]: https://docs.example.io/contributing/submitting/\n"
+        )
+        body = "- [x] Read [Submitting a pull request] first\n\nSee [Submitting a pull request].\n"
+        assert not any("instruction text" in f.message for f in check_template(body, template))
+
+    def test_release_block_rules(self):
+        from pr_body_check import check_release_block
+
+        template = "```release-note\n<!-- one line; remove this release-note section if not needed -->\n```\n"
+        empty = "```release-note\n<!-- one line -->\n```\n"
+        assert check_release_block(empty, template)[0].level == "FAIL"
+        assert check_release_block("no block, removal allowed", template) == []
+
+    def test_verification_claims_need_confirmation(self):
+        from pr_body_check import check_attestations
+
+        warns = check_attestations("- [x] It works as expected from a user's perspective\n- [x] Docs\n")
+        assert len(warns) == 1 and "confirm it was actually done" in warns[0].message
+
+    def test_closing_comment_prefers_the_closer_and_ignores_welcome_bots(self):
+        comments = [
+            {"user": {"login": "author"}, "body": "I signed the CLA", "created_at": "2026-10-01T09:00:00Z"},
+            {
+                "user": {"login": "stale-bot", "type": "Bot"},
+                "body": "Closing: no activity",
+                "created_at": "2026-10-01T10:00:00Z",
+            },
+        ]
+        assert closing_comment(comments, "2026-10-01T10:00:05Z", "stale-bot")["user"]["login"] == "stale-bot"
+        welcome = [
+            {"user": {"login": "welcome-bot", "type": "Bot"}, "body": "Welcome!", "created_at": "2026-10-01T08:00:00Z"}
+        ]
+        assert closing_comment(welcome, "2026-10-02T00:00:00Z", "maintainer") is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "we can't accept patches co-authored by Copilot",
+            "please don't AI-generate solutions for open issues",
+            "This description is not human-written",
+        ],
+    )
+    def test_more_ai_closure_phrasings(self, text):
+        from base_rate import AI_CLOSURE
+
+        assert AI_CLOSURE.search(text)
+
+    def test_docs_site_links_map_to_repo_files(self):
+        from profile_draft import docs_site_path
+
+        tree = {"Documentation/contributing/development/contributing_guide.rst", "README.md"}
+        url = "https://docs.cilium.io/en/stable/contributing/development/contributing_guide/#submitting"
+        assert docs_site_path(url, tree) == "Documentation/contributing/development/contributing_guide.rst"
+
+    def test_run_blocks_stop_at_dedent_and_checks_rank_first(self):
+        from profile_draft import ranked_commands
+
+        workflow = (
+            "on: pull_request\njobs:\n  a:\n    steps:\n      - run: |\n          echo hi\n"
+            "      - name: Setup Go\n        uses: x\n      - run: make release-notes\n      - run: make lint\n"
+        )
+        assert workflow_commands(workflow) == ["make release-notes", "make lint"]
+        assert ranked_commands({".github/workflows/ci.yml": workflow})[0] == "make lint"
+
+    def test_backports_are_not_sampled_and_code_by_user_is_detected(self):
+        from profile_draft import CODE_BY_USER, is_sample_candidate
+
+        pr = {"merged_at": "x", "author_association": "CONTRIBUTOR", "user": {"login": "a"}, "title": "v1.20 Backports"}
+        assert not is_sample_candidate(pr, set())
+        assert is_sample_candidate(dict(pr, title="fix: a"), set())
+        assert CODE_BY_USER.search("AI can help you learn, but write the actual code yourself.")
+
+    def test_workflow_artifacts_are_not_changed_files(self):
+        from rules_for import WORKFLOW_ARTIFACT
+
+        assert WORKFLOW_ARTIFACT.search("review.json") and WORKFLOW_ARTIFACT.search("runs/with_fix.txt")
+        assert not WORKFLOW_ARTIFACT.search("src/review_json.py")

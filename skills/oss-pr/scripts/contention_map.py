@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _config import cache_dir
-from _gh import base_changed_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, use_utf8_stdout
+from _gh import base_changed_ranges, check_api_budget, current_login, gh_api_pages, parse_iso, run_main, use_utf8_stdout
 
 CACHE_VERSION = 2
 FILES_ENDPOINT_CAP = 3000
@@ -53,9 +53,11 @@ def fetch_pr_files(repo: str, number: int) -> dict | None:
     """{"files": path -> changed base ranges (None when GitHub sent no patch), "added": [new paths]}."""
     files: dict[str, list[list[int]] | None] = {}
     added: list[str] = []
+    entries = 0  # file entries GitHub returned; renames add a second key but one entry
     try:
         for page in gh_api_pages(f"repos/{repo}/pulls/{number}/files", max_pages=30):
             for f in page:
+                entries += 1
                 patch = f.get("patch")
                 ranges = [list(r) for r in base_changed_ranges(patch)] if patch else None
                 files[f["filename"]] = ranges
@@ -67,7 +69,7 @@ def fetch_pr_files(repo: str, number: int) -> dict | None:
     except RuntimeError:
         return None
     # GitHub's files endpoint stops at 3000 files; a PR that large may touch files the map cannot see.
-    return {"files": files, "added": added, "incomplete": len(files) >= FILES_ENDPOINT_CAP}
+    return {"files": files, "added": added, "incomplete": entries >= FILES_ENDPOINT_CAP}
 
 
 def build(repo: str) -> dict:
@@ -212,4 +214,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -34,6 +35,7 @@ from _gh import (
     gh_json,
     is_bot,
     parse_iso,
+    run_main,
     use_utf8_stdout,
 )
 
@@ -181,9 +183,10 @@ def rate_line(label: str, rows: list[ClosedPR]) -> str:
 
 
 AI_CLOSURE = re.compile(
-    r"(?i)\b(?:ai|llm|gpt)[- ](?:generated|written|authored|assisted|tools?|slop|patch(?:es)?)\b|\byour AI\b|"
-    r"generated (?:by|with) (?:an? )?(?:ai|llm|chatgpt|copilot|claude)|\bslop\b|autonomous agents?|"
-    r"coding agents?|\bAI[- ]policy\b|generative ai"
+    r"(?i)\b(?:ai|llm|gpt)[- ](?:generated?|written|authored|assisted|tools?|slop|patch(?:es)?|solutions?)\b|"
+    r"\byour AI\b|generated (?:by|with) (?:an? )?(?:ai|llm|chatgpt|copilot|claude)|\bslop\b|autonomous agents?|"
+    r"coding agents?|\bAI[- ]policy\b|generative ai|co-?authored by (?:copilot|claude|chatgpt|an? ai)|"
+    r"not (?:been )?(?:human[- ]written|written by a human)|\bAI-generate\w*"
 )
 BOILERPLATE = re.compile(
     r"(?i)install \S+ from this pr|preview (?:deploy|is ready|environment)|codecov|coverage report|"
@@ -191,30 +194,47 @@ BOILERPLATE = re.compile(
 )
 
 
-def closing_comment(comments: list[dict], closed_at: str) -> dict | None:
-    """The comment that explains the closure: the last one up to the close, preferring a person over a bot,
-    and skipping bot boilerplate such as install instructions or preview links."""
+def closing_comment(comments: list[dict], closed_at: str, closer: str = "") -> dict | None:
+    """The comment that explains the closure, up to the moment of closing.
+
+    Prefer the closer's own last comment. If a bot closed the PR, its comment is
+    the reason even when a person commented later about something else (a stale
+    bot closing over an author's unrelated CLA remark). Otherwise prefer the last
+    person's comment. A bot's welcome or boilerplate is never the reason for a
+    closure done silently by a person.
+    """
     cutoff = parse_iso(closed_at) + timedelta(minutes=10) if closed_at else None
     before = [c for c in comments if cutoff is None or parse_iso(c["created_at"]) <= cutoff] or comments
     useful = [c for c in before if not BOILERPLATE.search(" ".join((c.get("body") or "").split()))]
+    by_closer = [c for c in useful if closer and c["user"]["login"] == closer]
+    if by_closer:
+        return by_closer[-1]
     humans = [c for c in useful if not is_bot(c["user"]["login"], c["user"].get("type", ""))]
-    pool = humans or useful
-    return pool[-1] if pool else None
+    if humans:
+        return humans[-1]
+    if closer and not is_bot(closer):
+        return None
+    return useful[-1] if useful else None
 
 
-def death_note(repo: str, pr: ClosedPR) -> str:
-    """Who closed the PR (the author, a bot, or someone else) and the comment that explains it."""
-    events = gh_json(["api", f"repos/{repo}/issues/{pr.number}/events?per_page=100"]) or []
+def death_note(repo: str, pr: ClosedPR, status: str = "") -> str:
+    """Who closed the PR (the author, a bot, or someone else), the author's status, and the reason."""
+    events = gh_json(["api", f"repos/{repo}/issues/{pr.number}/events?per_page=100"])
+    if events is None:
+        return "could not read the PR's events (network); closer unknown"
     closers = [e.get("actor") or {} for e in events if e.get("event") == "closed"]
-    closer = closers[-1].get("login", "?") if closers else "?"
-    if closer == pr.author:
-        who = "closed by the author"
-    elif is_bot(closer, closers[-1].get("type", "") if closers else ""):
-        who = f"closed by bot @{closer}"
+    closer = closers[-1].get("login", "") if closers else ""
+    tag = f"[{status}] " if status else ""
+    if not closer:
+        who = f"{tag}closer not recorded"
+    elif closer == pr.author:
+        who = f"{tag}closed by the author"
+    elif is_bot(closer, closers[-1].get("type", "")):
+        who = f"{tag}closed by bot @{closer}"
     else:
-        who = f"closed by @{closer}"
+        who = f"{tag}closed by @{closer}"
     comments = gh_json(["api", f"repos/{repo}/issues/{pr.number}/comments?per_page=100"]) or []
-    comment = closing_comment(comments, pr.closed_at)
+    comment = closing_comment(comments, pr.closed_at, closer)
     if comment is None:
         return f"{who}; no explaining comment"
     body = " ".join((comment.get("body") or "").split())
@@ -251,11 +271,13 @@ def main() -> None:
 
     me = args.me or current_login()
     since = (days_ago(args.days + LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    status_of: dict[int, str] = {}
     if not args.no_split:
         authors = sorted({r.author for r in external})
         print(f"classifying {len(authors)} external authors by merge history ...", file=sys.stderr)
         history = merge_history(args.repo, authors, since)
         newcomers, returning, unknown = split_by_status(external, history)
+        status_of = {r.number: "newcomer" for r in newcomers} | {r.number: "returning" for r in returning}
         print(rate_line("  newcomers", newcomers))
         print(rate_line("  returning contributors", returning))
         if unknown:
@@ -273,19 +295,23 @@ def main() -> None:
     dead = [r for r in external if not r.merged][: args.show_closed]
     if dead:
         print(f"\nwhy the {len(dead)} most recent closed-unmerged external PRs were closed:")
-        ai_closures = 0
+        ai_by_status: Counter[str] = Counter()
         for r in dead:
-            note = death_note(args.repo, r)
-            ai_closures += bool(AI_CLOSURE.search(note))
+            status = status_of.get(r.number, "")
+            note = death_note(args.repo, r, status)
+            if AI_CLOSURE.search(note):
+                ai_by_status[status or "unknown status"] += 1
             print(f"  #{r.number} @{r.author} ({r.association}) {r.title[:70]}")
             print(f"      {note}")
+        ai_closures = sum(ai_by_status.values())
         if ai_closures:
             share = 100 * ai_closures / len(dead)
             print(
-                f"\n{ai_closures} of {len(dead)} closures ({share:.0f}%) mention AI or LLM use. "
+                f"\n{ai_closures} of {len(dead)} closures ({share:.0f}%) mention AI or LLM use "
+                f"({', '.join(f'{n} {s}' for s, n in ai_by_status.items())}). "
                 "Re-check the AI-policy gate: practice can be stricter than the written policy."
             )
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

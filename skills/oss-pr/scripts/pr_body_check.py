@@ -90,28 +90,56 @@ def check_template(body: str, template: str) -> list[Finding]:
         for norm, raw in have:
             if not any(same_item(w, norm) for w, _ in wanted):
                 findings.append(Finding("FAIL", f"checklist item not in the template (invented?): {raw[:90]!r}"))
-    for instruction in TEMPLATE_INSTRUCTION.findall(strip_comments(template)):
+    for instruction in template_instructions(template):
         if instruction in body:
             findings.append(Finding("FAIL", f"template instruction text left in: {instruction[:80]!r}"))
     return findings
 
 
+def template_instructions(template: str) -> list[str]:
+    """Bracketed placeholder text the author must replace, e.g. `[Add information on how this was tested]`.
+
+    Reference-style link labels (`[Submitting a pull request]` with a `[...]: url`
+    definition) and text inside checklist items are part of the template's wording,
+    not placeholders, so they are excluded.
+    """
+    text = strip_comments(template)
+    defined = {label for label in re.findall(r"(?m)^\s*\[([^\]]+)\]:\s*\S+", text)}
+    prose = "\n".join(line for line in text.splitlines() if not CHECKBOX.match(line))
+    return [
+        item
+        for item in TEMPLATE_INSTRUCTION.findall(prose)
+        if item[1:-1] not in defined and not re.match(r"^\s*\[[^\]]+\]:", item)
+    ]
+
+
 def check_release_block(body: str, template: str) -> list[Finding]:
-    """Templates with a ```release-note block expect it filled in, not deleted."""
-    if re.search(r"```\s*release-notes?\b", template) and not re.search(r"```\s*release-notes?\b", body):
+    """A template's ```release-note block must be filled in; deleting it is allowed only if the template says so."""
+    if not re.search(r"```\s*release-notes?\b", template):
+        return []
+    block = re.search(r"```\s*release-notes?\b(.*?)```", body, re.DOTALL)
+    if block is None:
+        if re.search(r"(?i)remove (?:this|the) release[- ]notes?", template):
+            return []
         return [Finding("FAIL", "the template's ```release-note block is missing from the body")]
+    if not strip_comments(block.group(1)).strip():
+        return [Finding("FAIL", "the ```release-note block is empty; write the note or follow the template's rule")]
     return []
 
 
 def check_attestations(body: str) -> list[Finding]:
-    """Ticked boxes that state something about the person ("I have read ...") can only be confirmed by the user."""
+    """Ticked boxes are claims. Statements about the person ("I have read ...") and claims of verification
+    ("works as expected", "tested") must be confirmed, by the user or by evidence, before submitting."""
     findings = []
     for line in strip_comments(body).splitlines():
         match = re.match(r"^\s*[-*]\s*\[[xX]\]\s*(.+?)\s*$", line)
-        if match and re.match(r"(?i)(?:i\b|i'(?:ve|m)\b|my\b|we\b)", match.group(1)):
-            findings.append(
-                Finding("WARN", f"ticked statement about the user, confirm with them: {match.group(1)[:80]!r}")
-            )
+        if not match:
+            continue
+        item = match.group(1)
+        if re.match(r"(?i)(?:i\b|i'(?:ve|m)\b|my\b|we\b)", item):
+            findings.append(Finding("WARN", f"ticked statement about the user, confirm with them: {item[:80]!r}"))
+        elif re.search(r"(?i)\b(?:works?|tested|verified|checked|expected|passes|reviewed|documented)\b", item):
+            findings.append(Finding("WARN", f"ticked claim, confirm it was actually done: {item[:80]!r}"))
     return findings
 
 
